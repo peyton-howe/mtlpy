@@ -27,3 +27,6 @@ _skbuild/
 # Test artifacts
 .pytest_cache/
 .coverage
+
+# Benchmark output (local baselines, not source)
+benchmarks/results/
