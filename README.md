@@ -163,6 +163,32 @@ print(b.contents)  # [1. 4. 9. 16.]
 Threadgroup sizing is computed automatically from the pipeline's
 `thread_execution_width` and `max_threads_per_threadgroup`.
 
+## Reusing buffers in a hot loop
+
+`Buffer.contents` is a live NumPy view over the same underlying Metal
+allocation, not a copy — writing `buf.contents[:] = ...` updates GPU-visible
+memory in place, and reading it back after a `wait=True` dispatch needs no
+reallocation either. For a kernel dispatched repeatedly (e.g. in a `while`
+loop), compile the pipeline and allocate buffers once, then just write/read
+`.contents` each iteration:
+
+```python
+pipeline = device.compile(source, "square")
+
+a   = device.buffer(np.zeros(4, dtype=np.float32))  # allocated once
+out = device.empty(4, np.float32)                    # allocated once
+
+while running:
+    a.contents[:] = get_next_input()   # in-place write, no realloc
+    pipeline.run([a, out], grid=4)     # wait=True by default
+    consume(out.contents)              # in-place read, no realloc
+```
+
+The convenience operators (`a + b`, `operators.sqrt(a)`, `astype`, etc.)
+don't follow this pattern — each call allocates a fresh output `Buffer`
+internally, which is fine for one-off use but wasteful in a tight loop. See
+`examples/reuse_buffers.py`.
+
 ## Testing
 
 ```bash
@@ -173,6 +199,8 @@ pytest tests/
   dtype, and `astype` conversion, plus error handling for mismatched
   buffer sizes/dtypes.
 - `test_async.py` — `wait=False` dispatch ordering.
+- `test_buffer_reuse.py` — in-place `.contents` writes and repeated dispatch
+  against the same buffers, without reallocation.
 - `test_stability.py` — repeated-dispatch and object-lifetime stress tests
   (regression coverage for the Metal object-ownership rules in `csrc/`).
 - `test_pipeline_persistence.py` — spawns separate processes to verify the
