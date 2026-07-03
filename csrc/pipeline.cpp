@@ -1,9 +1,19 @@
 #include "pipeline.h"
 #include "buffer.h"
+#include <Foundation/NSAutoreleasePool.hpp>
 #include <cmath>
 #include <stdexcept>
 
 namespace mtlpy {
+
+namespace {
+// RAII wrapper so the pool is always drained, including on the exception
+// paths in Pipeline::run().
+struct PoolGuard {
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    ~PoolGuard() { pool->release(); }
+};
+} // namespace
 
 Pipeline::Pipeline(MTL::ComputePipelineState* state, MTL::CommandQueue* queue)
     : state_(state), queue_(queue)
@@ -22,7 +32,13 @@ MTL::Size Pipeline::compute_threadgroup_size(const std::array<uint32_t, 3>& grid
     const uint32_t max_tot  = (uint32_t)state_->maxTotalThreadsPerThreadgroup();
 
     if (grid[1] == 1 && grid[2] == 1) {
-        return MTL::Size::Make(max_tot, 1, 1);
+        // Round down to a multiple of tew: the other two branches get this
+        // for free (their width is tew itself), but max_tot isn't
+        // guaranteed to be one. Pipelines are compiled with
+        // threadGroupSizeIsMultipleOfThreadExecutionWidth=true, so every
+        // branch here must actually uphold that invariant.
+        uint32_t w = (max_tot / tew) * tew;
+        return MTL::Size::Make(w > 0 ? w : tew, 1, 1);
     }
     if (grid[2] == 1) {
         uint32_t h = max_tot / tew;
@@ -39,15 +55,19 @@ void Pipeline::run(
     const std::array<uint32_t, 3>& grid,
     bool                           wait
 ) {
-    auto* cmd = queue_->commandBuffer();
+    PoolGuard guard;
+
+    // Buffer lifetime is owned by Python (pybind11 keep_alive ties Buffer to
+    // Device), so we don't need Metal's default per-command-buffer strong
+    // referencing of resources -- skipping it avoids that bookkeeping cost
+    // on every dispatch.
+    auto* cmd = queue_->commandBufferWithUnretainedReferences();
     if (!cmd)
         throw std::runtime_error("Failed to create Metal command buffer");
 
     auto* encoder = cmd->computeCommandEncoder();
-    if (!encoder) {
-        cmd->release();
+    if (!encoder)
         throw std::runtime_error("Failed to create compute encoder");
-    }
 
     encoder->setComputePipelineState(state_);
 
@@ -59,7 +79,6 @@ void Pipeline::run(
 
     encoder->dispatchThreads(grid_size, threads_per_group);
     encoder->endEncoding();
-    encoder->release();
 
     cmd->commit();
 
@@ -69,12 +88,9 @@ void Pipeline::run(
             std::string err = cmd->error()
                 ? cmd->error()->localizedDescription()->utf8String()
                 : "Unknown GPU error";
-            cmd->release();
             throw std::runtime_error("GPU execution failed: " + err);
         }
     }
-
-    cmd->release();
 }
 
 } // namespace mtlpy

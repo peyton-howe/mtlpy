@@ -17,7 +17,7 @@ Device::Device() {
         throw std::runtime_error("Failed to create Metal command queue");
     }
 
-    cache_ = new PipelineCache();
+    cache_ = new PipelineCache(device_);
 }
 
 Device::~Device() {
