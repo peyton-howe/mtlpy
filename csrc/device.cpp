@@ -31,8 +31,8 @@ Buffer* Device::create_buffer(size_t size_bytes) {
 }
 
 Pipeline* Device::compile(const std::string& source, const std::string& function_name) {
-    auto* state = cache_->get_or_create(device_, source, function_name);
-    return new Pipeline(state, queue_);
+    auto cached = cache_->get_or_create(device_, source, function_name);
+    return new Pipeline(cached.state, queue_, cached.required_buffer_count);
 }
 
 uint32_t Device::max_threads_per_threadgroup() const {

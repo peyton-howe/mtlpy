@@ -22,6 +22,14 @@ def test_buffer_roundtrip(device):
     np.testing.assert_array_equal(buf.contents, data)
 
 
+def test_buffer_from_multidim_array(device):
+    # Buffer.contents is always flat; device.buffer() must flatten its input
+    # to match rather than trying to broadcast a 2D array into a 1D one.
+    img = np.arange(24, dtype=np.float32).reshape(4, 6)
+    buf = device.buffer(img)
+    np.testing.assert_array_equal(buf.contents, img.reshape(-1))
+
+
 def test_add(device):
     a = device.buffer(np.array([1.0, 2.0, 3.0], dtype=np.float32))
     b = device.buffer(np.array([4.0, 5.0, 6.0], dtype=np.float32))
@@ -75,6 +83,29 @@ kernel void square(
     b = device.empty(4, np.float32)
     pipeline.run([a, b], 4)
     np.testing.assert_array_almost_equal(b.contents, [1.0, 4.0, 9.0, 16.0])
+
+
+def test_run_with_too_few_buffers_raises(device):
+    # An unbound buffer argument is undefined behavior in Metal, not a safe
+    # no-op -- Pipeline.run must catch this itself via reflection rather
+    # than letting the kernel read garbage/null silently.
+    pipeline = device.compile(
+        """
+#include <metal_stdlib>
+using namespace metal;
+kernel void square(
+    device const float *a [[buffer(0)]],
+    device       float *b [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    b[id] = a[id] * a[id];
+}
+""",
+        "square",
+    )
+    a = device.buffer(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+    with pytest.raises(RuntimeError):
+        pipeline.run([a], 4)  # missing the output buffer
 
 
 def test_pipeline_cache(device):

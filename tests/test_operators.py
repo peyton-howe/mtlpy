@@ -53,6 +53,15 @@ def test_binary_op_dtypes(device, op_name, op, dtype):
     np.testing.assert_array_equal(got, op(a_np, b_np))
 
 
+def test_cross_device_binary_op_raises():
+    from mtlpy import Device
+    dev1, dev2 = Device(), Device()
+    a = dev1.buffer(np.array([1.0], dtype=np.float32))
+    b = dev2.buffer(np.array([1.0], dtype=np.float32))
+    with pytest.raises(ValueError):
+        a + b
+
+
 def test_mismatched_size_raises(device):
     a = device.buffer(np.ones(4, dtype=np.float32))
     b = device.buffer(np.ones(5, dtype=np.float32))

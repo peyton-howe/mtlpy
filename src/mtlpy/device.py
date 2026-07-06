@@ -20,7 +20,7 @@ class Device:
         if isinstance(data, np.ndarray):
             arr = np.ascontiguousarray(data)
             buf = self.empty(arr.size, arr.dtype)
-            buf.contents[:] = arr
+            buf.contents[:] = arr.reshape(-1)  # buf.contents is always flat
             return buf
         size = int(data)
         dt   = utils.to_numpy(dtype)
@@ -36,6 +36,11 @@ class Device:
         return Pipeline(self._dev.compile(source, function_name))
 
     def _binary_op(self, name: str, shader_fn, a: Buffer, b: Buffer) -> Buffer:
+        if a._device is not b._device:
+            raise ValueError(
+                "Buffers belong to different Device instances -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
         if a.size != b.size:
             raise ValueError(f"Buffer size mismatch: {a.size} != {b.size}")
         if a.dtype != b.dtype:

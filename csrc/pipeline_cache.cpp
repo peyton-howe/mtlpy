@@ -1,4 +1,5 @@
 #include "pipeline_cache.h"
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
@@ -53,8 +54,8 @@ PipelineCache::PipelineCache(MTL::Device* device)
 }
 
 PipelineCache::~PipelineCache() {
-    for (auto& [key, state] : cache_)
-        state->release();
+    for (auto& [key, cached] : cache_)
+        cached.state->release();
 
     if (archive_) {
         NS::Error* error = nullptr;
@@ -63,7 +64,7 @@ PipelineCache::~PipelineCache() {
     }
 }
 
-MTL::ComputePipelineState* PipelineCache::get_or_create(
+CachedPipeline PipelineCache::get_or_create(
     MTL::Device*       device,
     const std::string& source,
     const std::string& function_name
@@ -109,8 +110,9 @@ MTL::ComputePipelineState* PipelineCache::get_or_create(
         descriptor->setBinaryArchives(archives);
     }
 
+    MTL::ComputePipelineReflection* reflection = nullptr;
     auto* state = device->newComputePipelineState(
-        descriptor, MTL::PipelineOptionNone, nullptr, &error);
+        descriptor, MTL::PipelineOptionArgumentInfo, &reflection, &error);
 
     if (!state && archive_) {
         // The archive may hold a binary for a different GPU family/driver
@@ -119,7 +121,7 @@ MTL::ComputePipelineState* PipelineCache::get_or_create(
         descriptor->setBinaryArchives(nullptr);
         error = nullptr;
         state = device->newComputePipelineState(
-            descriptor, MTL::PipelineOptionNone, nullptr, &error);
+            descriptor, MTL::PipelineOptionArgumentInfo, &reflection, &error);
     }
 
     if (!state) {
@@ -137,8 +139,23 @@ MTL::ComputePipelineState* PipelineCache::get_or_create(
 
     descriptor->release();
 
-    cache_[key] = state;
-    return state;
+    // One past the highest active buffer-argument index the shader reads --
+    // both `device` and `constant` parameters report as ArgumentTypeBuffer,
+    // so this covers both without needing to distinguish them.
+    uint32_t required_buffer_count = 0;
+    if (reflection) {
+        auto* args = reflection->arguments();
+        for (NS::UInteger i = 0; i < args->count(); ++i) {
+            auto* arg = args->object<MTL::Argument>(i);
+            if (arg->type() == MTL::ArgumentTypeBuffer && arg->isActive())
+                required_buffer_count = std::max<uint32_t>(
+                    required_buffer_count, (uint32_t)arg->index() + 1);
+        }
+    }
+
+    CachedPipeline cached{state, required_buffer_count};
+    cache_[key] = cached;
+    return cached;
 }
 
 } // namespace mtlpy

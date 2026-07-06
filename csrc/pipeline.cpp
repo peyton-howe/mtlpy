@@ -15,8 +15,9 @@ struct PoolGuard {
 };
 } // namespace
 
-Pipeline::Pipeline(MTL::ComputePipelineState* state, MTL::CommandQueue* queue)
-    : state_(state), queue_(queue)
+Pipeline::Pipeline(MTL::ComputePipelineState* state, MTL::CommandQueue* queue,
+                    uint32_t required_buffer_count)
+    : state_(state), queue_(queue), required_buffer_count_(required_buffer_count)
 {}
 
 uint32_t Pipeline::thread_execution_width() const {
@@ -55,6 +56,16 @@ void Pipeline::run(
     const std::array<uint32_t, 3>& grid,
     bool                           wait
 ) {
+    if (buffers.size() < required_buffer_count_) {
+        throw std::runtime_error(
+            "Kernel reads buffer argument(s) up to index " +
+            std::to_string(required_buffer_count_ - 1) + ", but only " +
+            std::to_string(buffers.size()) +
+            " buffer(s) were passed to run() -- an unbound buffer argument "
+            "is undefined behavior in Metal, not a safe no-op."
+        );
+    }
+
     PoolGuard guard;
 
     // Must retain references: with wait=False the caller can drop its last
