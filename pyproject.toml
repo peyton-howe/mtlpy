@@ -7,8 +7,10 @@ name = "mtlpy"
 version = "0.1.0"
 description = "Python bindings for Apple Metal GPU compute"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
+authors = [{ name = "Peyton Howe" }]
 keywords = ["metal", "gpu", "compute", "apple", "macos", "mtl"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -20,6 +22,11 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = ["numpy>=1.20"]
+
+[project.urls]
+Homepage = "https://github.com/peyton-howe/mtlpy"
+Repository = "https://github.com/peyton-howe/mtlpy"
+Issues = "https://github.com/peyton-howe/mtlpy/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
