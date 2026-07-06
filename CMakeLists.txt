@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
+
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+
 project(mtlpy LANGUAGES CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 17)
