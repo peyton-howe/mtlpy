@@ -4,6 +4,10 @@ import numpy as np
 from . import shader, utils
 
 
+class _BackedArray(np.ndarray):
+    """ndarray subclass with a __dict__, so it can hold a _mtlpy_buf backref."""
+
+
 class Buffer:
     def __init__(self, _buf, dtype: np.dtype, size: int, device):
         self._buf    = _buf             # _mtlpy.Buffer
@@ -15,7 +19,7 @@ class Buffer:
     def contents(self) -> np.ndarray:
         nbytes     = self.size * self.dtype.itemsize
         ctypes_arr = (ctypes.c_byte * nbytes).from_address(self._buf.data_ptr)
-        arr        = np.ctypeslib.as_array(ctypes_arr).view(self.dtype)
+        arr        = np.ctypeslib.as_array(ctypes_arr).view(self.dtype).view(_BackedArray)
         arr._mtlpy_buf = self           # keep Buffer alive while array is alive
         return arr
 

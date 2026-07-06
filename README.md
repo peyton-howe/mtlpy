@@ -79,10 +79,12 @@ GPU-visible memory.
   `sin`, `tan`, `exp`, `log`, and `astype` for dtype conversion.
 - **Custom kernels**: compile and dispatch arbitrary Metal Shading Language
   source directly (see [Custom kernels](#custom-kernels) below).
-- **Dtype support**: `float32`, `float64`, `float16`, `int32`, `uint32`,
+- **Dtype support**: `float32`, `float16`, `int32`, `uint32`,
   `int16`, `uint16`, `int64`, `uint64`, `bool` — mapped to their Metal
-  equivalents (`float`, `double`, `half`, `int`, `uint`, `short`, `ushort`,
-  `long`, `ulong`, `bool`) in `src/mtlpy/utils.py`.
+  equivalents (`float`, `half`, `int`, `uint`, `short`, `ushort`,
+  `long`, `ulong`, `bool`) in `src/mtlpy/utils.py`. `float64` has no Metal
+  equivalent (no Apple GPU supports double precision), so it's silently
+  downcast to `float32` at buffer creation.
 - **Pipeline caching**: identical (source, function name) pairs are compiled
   once per process and reused; a binary archive on disk
   (`~/Library/Caches/mtlpy/pipelines.metallib`) carries compiled pipelines

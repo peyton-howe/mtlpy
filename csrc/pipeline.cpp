@@ -57,11 +57,13 @@ void Pipeline::run(
 ) {
     PoolGuard guard;
 
-    // Buffer lifetime is owned by Python (pybind11 keep_alive ties Buffer to
-    // Device), so we don't need Metal's default per-command-buffer strong
-    // referencing of resources -- skipping it avoids that bookkeeping cost
-    // on every dispatch.
-    auto* cmd = queue_->commandBufferWithUnretainedReferences();
+    // Must retain references: with wait=False the caller can drop its last
+    // Python reference to an input/output Buffer (e.g. reassigning `acc` in
+    // an accumulate loop) before the GPU has actually finished the dispatch.
+    // commandBuffer() makes Metal hold the MTL::Buffers alive until this
+    // command buffer completes, regardless of what Python does in the
+    // meantime.
+    auto* cmd = queue_->commandBuffer();
     if (!cmd)
         throw std::runtime_error("Failed to create Metal command buffer");
 

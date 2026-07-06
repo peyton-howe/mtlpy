@@ -84,8 +84,10 @@ def test_astype_pairs(device, src_dtype, dst_dtype):
     src = np.array([1, 2, 3, 4], dtype=src_dtype)
     buf = device.buffer(src)
     out = buf.astype(dst_dtype)
-    assert out.dtype == np.dtype(dst_dtype)
-    np.testing.assert_allclose(out.contents, src.astype(dst_dtype))
+    # float64 has no Metal equivalent, so it's downcast to float32.
+    expected_dtype = np.float32 if np.dtype(dst_dtype) == np.float64 else np.dtype(dst_dtype)
+    assert out.dtype == expected_dtype
+    np.testing.assert_allclose(out.contents, src.astype(expected_dtype))
 
 
 def test_single_element_buffer(device):
