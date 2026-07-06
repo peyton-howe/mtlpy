@@ -30,7 +30,14 @@ PYBIND11_MODULE(_mtlpy, m) {
 
     py::class_<Pipeline>(m, "Pipeline")
         .def("run", &Pipeline::run,
-             py::arg("buffers"), py::arg("grid"), py::arg("wait") = true)
+             py::arg("buffers"), py::arg("grid"), py::arg("wait") = true,
+             // Pipeline::run touches only raw C++/Metal state after argument
+             // conversion (no PyObject* access), so it's safe to release the
+             // GIL for the whole call -- otherwise a wait=True dispatch fully
+             // blocks every other Python thread for the entire GPU round
+             // trip (confirmed: a background thread made ~zero progress
+             // during the call, not just some).
+             py::call_guard<py::gil_scoped_release>())
         .def("thread_execution_width",      &Pipeline::thread_execution_width)
         .def("max_threads_per_threadgroup", &Pipeline::max_threads_per_threadgroup);
 }
