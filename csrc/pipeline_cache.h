@@ -28,6 +28,12 @@ public:
         const std::string& function_name
     );
 
+    // Serialize the on-disk binary archive now, without waiting for the
+    // destructor -- lets a long-running process checkpoint newly-compiled
+    // pipelines periodically instead of only at exit (whose GC/finalizer
+    // timing isn't deterministic).
+    void flush();
+
 private:
     std::unordered_map<std::string, CachedPipeline> cache_;
     std::mutex mutex_;

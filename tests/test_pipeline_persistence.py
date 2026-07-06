@@ -69,3 +69,21 @@ def test_archive_persists_across_process_launches():
         f"\ncold-process add(): {cold['elapsed'] * 1e3:.3f} ms   "
         f"warm-process add(): {warm['elapsed'] * 1e3:.3f} ms"
     )
+
+
+def test_flush_cache_writes_archive_without_waiting_for_gc():
+    """Device.flush_cache() / the `with Device() as d:` context manager
+    should serialize the archive immediately, not just eventually via
+    PipelineCache::~PipelineCache() on garbage collection."""
+    if ARCHIVE_PATH.exists():
+        ARCHIVE_PATH.unlink()
+
+    from mtlpy import Device
+
+    with Device() as dev:
+        a = dev.buffer(np.array([1.0, 2.0], dtype=np.float32))
+        b = dev.buffer(np.array([3.0, 4.0], dtype=np.float32))
+        _ = a + b
+        assert not ARCHIVE_PATH.exists(), "archive should not exist before __exit__"
+
+    assert ARCHIVE_PATH.exists(), "with-block __exit__ should have flushed the archive"

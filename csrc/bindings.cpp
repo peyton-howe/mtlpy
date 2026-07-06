@@ -10,8 +10,10 @@ using namespace mtlpy;
 PYBIND11_MODULE(_mtlpy, m) {
     m.doc() = "Apple Metal GPU compute bindings";
 
+    m.def("list_devices", &Device::available_device_names);
+
     py::class_<Device>(m, "Device")
-        .def(py::init<>())
+        .def(py::init<int>(), py::arg("index") = -1)
         .def("create_buffer", &Device::create_buffer,
              py::arg("size_bytes"),
              py::return_value_policy::take_ownership,
@@ -20,7 +22,8 @@ PYBIND11_MODULE(_mtlpy, m) {
              py::arg("source"), py::arg("function_name"),
              py::return_value_policy::take_ownership,
              py::keep_alive<0, 1>())   // keep Device alive while Pipeline is alive
-        .def("max_threads_per_threadgroup", &Device::max_threads_per_threadgroup);
+        .def("max_threads_per_threadgroup", &Device::max_threads_per_threadgroup)
+        .def("flush_cache", &Device::flush_cache);
 
     py::class_<Buffer>(m, "Buffer")
         .def_property_readonly("data_ptr", [](const Buffer& b) {

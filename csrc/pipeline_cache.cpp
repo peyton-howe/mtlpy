@@ -64,6 +64,18 @@ PipelineCache::~PipelineCache() {
     }
 }
 
+void PipelineCache::flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!archive_)
+        return;
+    NS::Error* error = nullptr;
+    archive_->serializeToURL(url_for(archive_path_), &error);
+    // Best-effort, same as the destructor's serialize call -- a failed
+    // flush (e.g. disk full) just means the next process recompiles from
+    // source, not a reason to raise from what's meant to be a cheap,
+    // periodic checkpoint.
+}
+
 CachedPipeline PipelineCache::get_or_create(
     MTL::Device*       device,
     const std::string& source,

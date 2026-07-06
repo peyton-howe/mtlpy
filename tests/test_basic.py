@@ -22,6 +22,22 @@ def test_buffer_roundtrip(device):
     np.testing.assert_array_equal(buf.contents, data)
 
 
+def test_list_devices_and_explicit_selection():
+    names = mtlpy.list_devices()
+    assert len(names) >= 1
+    assert all(isinstance(n, str) and n for n in names)
+
+    dev = Device(index=0)
+    a = dev.buffer(np.array([1.0, 2.0], dtype=np.float32))
+    b = dev.buffer(np.array([3.0, 4.0], dtype=np.float32))
+    np.testing.assert_allclose((a + b).contents, [4.0, 6.0])
+
+
+def test_device_out_of_range_index_raises():
+    with pytest.raises(RuntimeError):
+        Device(index=len(mtlpy.list_devices()) + 100)
+
+
 def test_buffer_from_multidim_array(device):
     # Buffer.contents is always flat; device.buffer() must flatten its input
     # to match rather than trying to broadcast a 2D array into a 1D one.

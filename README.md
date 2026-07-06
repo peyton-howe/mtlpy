@@ -36,11 +36,9 @@ improvements:
 
 ## Status
 
-Alpha. The scaffolding — C++ extension, Python package, build config, tests,
-and benchmarks — is in place but has not yet been built or run: that
-requires a Mac with Xcode, which this was developed without. If you're
-picking this up on a Mac, see [Building from source](#building-from-source)
-and start with the test suite.
+Alpha, but built, tested, and benchmarked on real Apple Silicon hardware —
+see [Building from source](#building-from-source) and the test suite for
+current coverage.
 
 ## Architecture
 
@@ -56,14 +54,14 @@ csrc/                C++ extension (pybind11 + metal-cpp)
                         NS::/CA::/MTL:: private implementations
   bindings.cpp         pybind11 module definition (`_mtlpy`)
 src/mtlpy/          Python package (src layout, for PyPI)
-  device.py            Device: buffer/empty/compile, wraps _mtlpy.Device
-  buffer.py             Buffer: NumPy-backed contents, arithmetic operators
+  device.py            Device: buffer/empty/compile, list_devices(), wraps _mtlpy.Device
+  buffer.py             Buffer: NumPy-backed contents, arithmetic/comparison/in-place operators
   pipeline.py           Pipeline: thin wrapper over _mtlpy.Pipeline
-  operators.py          sqrt/cos/sin/tan/exp/log
+  operators.py          sqrt/cos/sin/tan/exp/log, sum/max/min/mean reductions
   shader.py             Generates Metal Shading Language source per dtype
   utils.py              NumPy dtype <-> Metal type name mapping
 tests/               pytest suite
-benchmarks/          Standalone performance baseline script
+benchmarks/          Standalone performance baseline scripts
 examples/            Runnable usage examples
 ```
 
@@ -71,31 +69,57 @@ Each `Device` in Python owns exactly one `MTL::Device`, one `MTL::CommandQueue`,
 and one `PipelineCache`. Buffers use `MTL::ResourceStorageModeShared`, so on
 Apple Silicon's unified memory there's no copy between CPU and GPU views of
 the same allocation — `Buffer.contents` is a NumPy array backed directly by
-GPU-visible memory.
+GPU-visible memory (accessing `.contents` is a true zero-copy view; writing
+new data into it via `buf.contents[:] = arr` is still a real memcpy from
+`arr`'s own memory, same as it would be for any destination).
 
 ## Features
 
-- **Elementwise operators**: `+`, `-`, `*` on `Buffer`, plus `sqrt`, `cos`,
-  `sin`, `tan`, `exp`, `log`, and `astype` for dtype conversion.
+- **Elementwise operators**: `+`, `-`, `*`, `/`, unary `-`, and in-place
+  `+=`/`-=`/`*=`/`/=` (which dispatch in-place, into the same `Buffer`, with
+  no extra allocation) on `Buffer` — each also works with a NumPy/Python
+  scalar on either side (`buf + 5.0`, `5.0 - buf`), not just `Buffer op
+  Buffer`. Plus `sqrt`, `cos`, `sin`, `tan`, `exp`, `log`, and `astype` for
+  dtype conversion.
+- **Comparisons**: `==`, `!=`, `<`, `<=`, `>`, `>=` (against another `Buffer`
+  or a scalar) return a `bool` `Buffer`, matching NumPy's `ndarray`
+  convention — which also makes `Buffer` unhashable, same tradeoff NumPy
+  makes.
+- **Reductions**: `operators.sum`/`max`/`min`/`mean` — an O(log n) multi-pass
+  tree reduction returning a plain Python scalar.
 - **Custom kernels**: compile and dispatch arbitrary Metal Shading Language
   source directly (see [Custom kernels](#custom-kernels) below).
+  `Pipeline.run` validates the buffer count against the kernel's own
+  argument reflection, so passing too few buffers raises a clear Python
+  exception instead of leaving a Metal buffer argument unbound (undefined
+  behavior).
 - **Dtype support**: `float32`, `float16`, `int32`, `uint32`,
   `int16`, `uint16`, `int64`, `uint64`, `bool` — mapped to their Metal
   equivalents (`float`, `half`, `int`, `uint`, `short`, `ushort`,
   `long`, `ulong`, `bool`) in `src/mtlpy/utils.py`. `float64` has no Metal
   equivalent (no Apple GPU supports double precision), so it's silently
-  downcast to `float32` at buffer creation.
+  downcast to `float32` at buffer creation. Note that `Buffer / Buffer` uses
+  Metal's native `/` for the shared dtype (truncating for integers), not
+  NumPy's always-promote-to-float64 semantics.
 - **Pipeline caching**: identical (source, function name) pairs are compiled
   once per process and reused; a binary archive on disk
   (`~/Library/Caches/mtlpy/pipelines.metallib`) carries compiled pipelines
-  across process launches too.
+  across process launches too. `Device.flush_cache()` (or using `Device` as
+  a context manager: `with mtlpy.Device() as d:`) serializes it on demand,
+  rather than only when the `Device` is garbage collected.
 - **Async dispatch**: `wait=False` commits work without blocking; Metal
   retires command buffers on a queue in commit order, so a later `wait=True`
   dispatch that reads the result is enough to synchronize (see
-  `examples/async_dispatch.py`).
+  `examples/async_dispatch.py`). `Pipeline.run` releases the GIL for the
+  whole call, so other Python threads keep running during the GPU wait
+  instead of being blocked for its full duration.
+- **Multi-GPU support**: `mtlpy.list_devices()` lists every Metal-capable GPU
+  on the machine; `mtlpy.Device(index=...)` selects one (the default targets
+  the system default GPU).
 - **Errors as exceptions**: shader compile failures, missing kernel
-  functions, and GPU execution errors all raise Python exceptions with
-  Metal's own error text, instead of failing silently.
+  functions, mismatched buffer counts, mismatched-`Device` operands, and GPU
+  execution errors all raise Python exceptions with a clear message, instead
+  of failing silently or invoking undefined behavior.
 
 ## Building from source
 
@@ -186,9 +210,11 @@ while running:
     consume(out.contents)              # in-place read, no realloc
 ```
 
-The convenience operators (`a + b`, `operators.sqrt(a)`, `astype`, etc.)
-don't follow this pattern — each call allocates a fresh output `Buffer`
-internally, which is fine for one-off use but wasteful in a tight loop. See
+The out-of-place convenience operators (`a + b`, `operators.sqrt(a)`,
+`astype`, etc.) don't follow this pattern — each call allocates a fresh
+output `Buffer` internally, which is fine for one-off use but wasteful in a
+tight loop. The in-place operators (`a += b`, `a *= 2.0`, ...) do reuse `a`'s
+own buffer with no extra allocation, if that fits your loop. See
 `examples/reuse_buffers.py`.
 
 ## Testing
@@ -197,16 +223,20 @@ internally, which is fine for one-off use but wasteful in a tight loop. See
 pytest tests/
 ```
 
-- `test_basic.py` / `test_operators.py` — correctness for every operator,
-  dtype, and `astype` conversion, plus error handling for mismatched
-  buffer sizes/dtypes.
+- `test_basic.py` / `test_operators.py` — correctness for every operator
+  (arithmetic, scalar broadcasting, comparisons, in-place, reductions),
+  dtype, and `astype` conversion, plus error handling for mismatched buffer
+  sizes/dtypes/devices and wrong kernel argument counts.
 - `test_async.py` — `wait=False` dispatch ordering.
 - `test_buffer_reuse.py` — in-place `.contents` writes and repeated dispatch
   against the same buffers, without reallocation.
 - `test_stability.py` — repeated-dispatch and object-lifetime stress tests
-  (regression coverage for the Metal object-ownership rules in `csrc/`).
+  (regression coverage for the Metal object-ownership rules in `csrc/`),
+  plus multi-threaded dispatch/compilation tests (`Pipeline.run` releases
+  the GIL, so this exercises genuinely concurrent Metal calls).
 - `test_pipeline_persistence.py` — spawns separate processes to verify the
-  on-disk pipeline binary archive is actually written and read back.
+  on-disk pipeline binary archive is actually written and read back, and
+  that `Device.flush_cache()` writes it on demand.
 
 ## Benchmarking
 
@@ -223,6 +253,13 @@ can baseline future changes:
 ```bash
 python benchmarks/bench.py --baseline benchmarks/results/<earlier-run>.json
 ```
+
+`benchmarks/demosaic_bench.py` is a separate, more involved benchmark
+comparing the edge-aware Bayer demosaicing kernel
+(`benchmarks/bayer2rgb_ea_kernel.txt`) against OpenCV's own
+`COLOR_Bayer*2BGR_EA` (requires `pip install -e ".[bench]"`), covering both
+single-shot dispatch latency and realistic streaming throughput (a rotating
+buffer pool pipelining dispatches instead of waiting on every frame).
 
 ## License
 

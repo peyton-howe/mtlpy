@@ -6,8 +6,26 @@
 
 namespace mtlpy {
 
-Device::Device() {
-    device_ = MTL::CreateSystemDefaultDevice();
+Device::Device(int index) {
+    if (index < 0) {
+        device_ = MTL::CreateSystemDefaultDevice();
+    } else {
+        // CopyAllDevices() returns +1-owned array whose elements it retains
+        // only for its own lifetime -- explicitly retain the one we're
+        // keeping before releasing the array, standard manual-refcounting
+        // pattern for Cocoa "copy" APIs.
+        auto* all = MTL::CopyAllDevices();
+        if (!all || (NS::UInteger)index >= all->count()) {
+            if (all)
+                all->release();
+            throw std::runtime_error(
+                "GPU index " + std::to_string(index) + " out of range "
+                "(see mtlpy.list_devices() for available GPUs)");
+        }
+        device_ = all->object<MTL::Device>((NS::UInteger)index);
+        device_->retain();
+        all->release();
+    }
     if (!device_)
         throw std::runtime_error("No Metal-capable device found");
 
@@ -37,6 +55,21 @@ Pipeline* Device::compile(const std::string& source, const std::string& function
 
 uint32_t Device::max_threads_per_threadgroup() const {
     return (uint32_t)device_->maxThreadsPerThreadgroup().width;
+}
+
+void Device::flush_cache() {
+    cache_->flush();
+}
+
+std::vector<std::string> Device::available_device_names() {
+    std::vector<std::string> names;
+    auto* all = MTL::CopyAllDevices();
+    if (all) {
+        for (NS::UInteger i = 0; i < all->count(); ++i)
+            names.push_back(all->object<MTL::Device>(i)->name()->utf8String());
+        all->release();
+    }
+    return names;
 }
 
 } // namespace mtlpy
