@@ -9,7 +9,7 @@ description = "Python bindings for Apple Metal GPU compute"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Peyton Howe" }]
 keywords = ["metal", "gpu", "compute", "apple", "macos", "mtl"]
 classifiers = [
@@ -18,6 +18,11 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: C++",
     "Topic :: Scientific/Engineering",
 ]
