@@ -40,7 +40,13 @@ BINARY_OPS = [
     ("mul", lambda a, b: a * b),
     ("div", lambda a, b: a / b),
 ]
-BINARY_DTYPES = [np.float32, np.float16, np.int32, np.uint32, np.int16]
+# Deliberately excludes bool: NumPy itself doesn't treat bool uniformly
+# across these ops (e.g. `-` raises TypeError on bool arrays), so bool gets
+# its own narrower test below instead of sharing this matrix.
+BINARY_DTYPES = [
+    np.float32, np.float16,
+    np.int32, np.uint32, np.int16, np.uint16, np.int64, np.uint64,
+]
 
 
 @pytest.mark.parametrize("dtype", BINARY_DTYPES, ids=lambda d: np.dtype(d).name)
@@ -52,6 +58,16 @@ def test_binary_op_dtypes(device, op_name, op, dtype):
     b = device.buffer(b_np)
     got = op(a, b).contents
     np.testing.assert_array_equal(got, op(a_np, b_np))
+
+
+def test_binary_op_bool_add(device):
+    # bool isn't in BINARY_DTYPES above because NumPy disallows `-` on bool
+    # arrays outright; `+` still works (Metal treats it like int promotion).
+    a_np = np.array([True, False, True], dtype=np.bool_)
+    b_np = np.array([True, True, False], dtype=np.bool_)
+    a = device.buffer(a_np)
+    b = device.buffer(b_np)
+    np.testing.assert_array_equal((a + b).contents, a_np + b_np)
 
 
 SCALAR_OPS = [
