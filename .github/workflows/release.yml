@@ -1,0 +1,141 @@
+name: Release
+
+# Runs on every push to main (i.e. every merged PR). If pyproject.toml's
+# [project].version was bumped and isn't already tagged: tags it, creates a
+# GitHub Release, builds the sdist + a wheel per supported Python version,
+# and publishes all of it to PyPI -- all in one workflow run.
+#
+# Deliberately one workflow, not tag-then-trigger-a-second-workflow: GitHub
+# doesn't let events caused by the default GITHUB_TOKEN (e.g. a release
+# created by an Actions step) trigger other workflows, as an anti-recursion
+# safeguard. That meant a separate "publish on release" workflow silently
+# never ran. Using `needs:` to sequence jobs within a single workflow run
+# has no such restriction, so this version doesn't need a PAT either.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  # Wheels only need building on the OLDEST macOS we support (14): the
+  # resulting binary installs and runs on every later macOS too, since
+  # macOS is backward- (not forward-) compatible. Building on the floor
+  # OS also means its older SDK can't let us accidentally call a
+  # macOS-15/26-only Metal API while still claiming macOS 14 support --
+  # see CMakeLists.txt for the matching CMAKE_OSX_DEPLOYMENT_TARGET.
+  # scikit-build-core reads this env var (not the CMake cache variable)
+  # to decide the wheel's platform tag.
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      released: ${{ steps.check_tag.outputs.exists == 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags, needed to check for an existing tag
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # need 3.11+ for stdlib tomllib below
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already tagged
+        id: check_tag
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git tag "$tag"
+          git push origin "$tag"
+          gh release create "$tag" --title "$tag" --generate-notes
+
+  build-sdist:
+    needs: tag-release
+    if: needs.tag-release.outputs.released == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ needs.tag-release.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    needs: tag-release
+    if: needs.tag-release.outputs.released == 'true'
+    runs-on: macos-14
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ needs.tag-release.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheel-cp${{ matrix.python-version }}
+          path: dist/*.whl
+
+  publish:
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-latest
+    environment: pypi # optional extra gate: add required reviewers to this
+    # GitHub Environment (Settings -> Environments) if you
+    # want a manual approval click before every publish.
+    permissions:
+      id-token: write # required for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "dist-*"
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
