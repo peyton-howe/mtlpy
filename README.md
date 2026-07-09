@@ -47,6 +47,8 @@ metal-cpp/          Apple's C++ Metal headers (git submodule)
 csrc/                C++ extension (pybind11 + metal-cpp)
   device.{h,cpp}       MTL::Device + MTL::CommandQueue owner
   buffer.{h,cpp}       MTL::Buffer wrapper (shared-storage, CPU/GPU unified memory)
+  texture.{h,cpp}      MTL::Texture wrapper (1D/2D/3D)
+  sampler.{h,cpp}      MTL::SamplerState wrapper
   pipeline.{h,cpp}     Dispatches a compiled MTL::ComputePipelineState
   pipeline_cache.{h,cpp}  Compiles-once cache, keyed on (source, function name),
                           backed by an on-disk MTL::BinaryArchive
@@ -54,12 +56,13 @@ csrc/                C++ extension (pybind11 + metal-cpp)
                         NS::/CA::/MTL:: private implementations
   bindings.cpp         pybind11 module definition (`_mtlpy`)
 src/mtlpy/          Python package (src layout, for PyPI)
-  device.py            Device: buffer/empty/compile, list_devices(), wraps _mtlpy.Device
+  device.py            Device: buffer/empty/texture/sampler/compile, list_devices(), wraps _mtlpy.Device
   buffer.py             Buffer: NumPy-backed contents, arithmetic/comparison/in-place operators
+  texture.py             Texture, Sampler: wrap _mtlpy.Texture/_mtlpy.Sampler
   pipeline.py           Pipeline: thin wrapper over _mtlpy.Pipeline
   operators.py          sqrt/cos/sin/tan/exp/log, sum/max/min/mean reductions
-  shader.py             Generates Metal Shading Language source per dtype
-  utils.py              NumPy dtype <-> Metal type name mapping
+  shader.py             Generates Metal Shading Language source per dtype/texture type
+  utils.py              NumPy dtype <-> Metal type/pixel format mapping
 tests/               pytest suite
 benchmarks/          Standalone performance baseline scripts
 examples/            Runnable usage examples
@@ -89,10 +92,18 @@ new data into it via `buf.contents[:] = arr` is still a real memcpy from
   tree reduction returning a plain Python scalar.
 - **Custom kernels**: compile and dispatch arbitrary Metal Shading Language
   source directly (see [Custom kernels](#custom-kernels) below).
-  `Pipeline.run` validates the buffer count against the kernel's own
-  argument reflection, so passing too few buffers raises a clear Python
-  exception instead of leaving a Metal buffer argument unbound (undefined
-  behavior).
+  `Pipeline.run` validates the buffer/texture/sampler counts against the
+  kernel's own argument reflection, so passing too few of any of them raises
+  a clear Python exception instead of leaving a Metal argument unbound
+  (undefined behavior).
+- **Textures**: 1D/2D/3D `Texture`s (`device.texture(array, pixel_format)` /
+  `device.empty_texture(shape, pixel_format)`) and `Sampler`s for kernels
+  written against `texture2d<...>`/etc. rather than raw buffers -- see
+  [Textures](#textures) below.
+- **Shapes**: `Buffer.shape` tracks the logical shape a buffer was created
+  or `reshape()`d with (elementwise ops preserve it); `Buffer.numpy()` /
+  `np.asarray(buf)` return contents in that shape. `Buffer.contents` itself
+  stays flat regardless — see [Shapes and NumPy interop](#shapes-and-numpy-interop).
 - **Dtype support**: `float32`, `float16`, `int32`, `uint32`,
   `int16`, `uint16`, `int64`, `uint64`, `bool` — mapped to their Metal
   equivalents (`float`, `half`, `int`, `uint`, `short`, `ushort`,
@@ -189,6 +200,123 @@ print(b.contents)  # [1. 4. 9. 16.]
 Threadgroup sizing is computed automatically from the pipeline's
 `thread_execution_width` and `max_threads_per_threadgroup`.
 
+## Shapes and NumPy interop
+
+`Buffer.contents` is deliberately always flat (see
+[Custom kernels](#custom-kernels) and the note above on unified memory) — but
+every `Buffer` also tracks a logical `.shape`, set when you create it from an
+ndarray or via `device.empty(shape, dtype)`, and preserved by the elementwise
+operators:
+
+```python
+img = np.arange(24, dtype=np.float32).reshape(4, 6)
+buf = device.buffer(img)
+
+buf.shape          # (4, 6)
+buf.contents.shape # (24,)  -- always flat
+buf.numpy().shape   # (4, 6) -- contents reshaped to buf.shape, still zero-copy
+
+np.asarray(buf)     # same as buf.numpy() -- Buffer implements __array__
+np.array(buf, dtype=np.float64)  # dtype conversion via the same protocol
+
+grid = buf.reshape(2, 12)  # new Buffer, same underlying Metal allocation
+```
+
+`.numpy()` and `__array__` are both zero-copy views, same as `.contents` —
+reshaping a flat contiguous array is always a view in NumPy, never a copy, so
+none of this allocates or duplicates GPU memory. `.reshape()` similarly
+shares the same `MTL::Buffer` rather than reallocating.
+
+Elementwise operators (`+`, `-`, `*`, comparisons, ...) check `.size`, not
+`.shape` — a Metal buffer has no shape of its own (it's just bytes), so two
+buffers with equal flat size but different declared `.shape` are still valid
+operands; the result takes the first operand's `.shape`. `.shape` is
+purely Python-side bookkeeping layered on top, not something Metal itself
+knows about.
+
+## Textures
+
+`Texture` wraps `MTL::Texture` (1D/2D/3D) for kernels that want
+`texture2d<...>`-style access instead of raw `device float*` buffers --
+useful for image-processing-style kernels, and for sampling (bilinear
+filtering, addressing modes) rather than plain indexing.
+
+```python
+img = np.random.rand(64, 64).astype(np.float32)          # (height, width)
+tex = device.texture(img, "r32Float")                      # uploads in one call
+
+invert_source = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void invert(
+    texture2d<float, access::read_write> tex [[texture(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    float4 c = tex.read(gid);
+    tex.write(1.0 - c, gid);
+}
+"""
+pipeline = device.compile(invert_source, "invert")
+pipeline.run([], grid=(64, 64, 1), textures=[tex])   # no buffers, one texture
+
+result = tex.download()  # or np.asarray(tex) / tex.numpy()
+```
+
+`Pipeline.run` takes `buffers`, `textures`, and `samplers` as separate lists
+because Metal Shading Language gives each its own independent binding
+namespace (`[[buffer(n)]]` / `[[texture(n)]]` / `[[sampler(n)]]`) -- list
+position `i` binds to index `i` in that namespace, same convention buffers
+already use. A sampling kernel needs a `Sampler` too:
+
+```python
+sample_source = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void downscale(
+    texture2d<float, access::sample> src [[texture(0)]],
+    texture2d<float, access::write>  dst [[texture(1)]],
+    sampler                          smp [[sampler(0)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    float2 uv = (float2(gid) + 0.5) / float2(dst.get_width(), dst.get_height());
+    dst.write(src.sample(smp, uv), gid);
+}
+"""
+small = device.empty_texture((32, 32), "r32Float")
+smp   = device.sampler(linear=True)   # linear=False for nearest-neighbor
+downscale = device.compile(sample_source, "downscale")
+downscale.run([], grid=(32, 32, 1), textures=[tex, small], samplers=[smp])
+```
+
+A few things that differ from `Buffer`:
+
+- **No zero-copy `.contents`.** Metal doesn't guarantee a texture's
+  CPU-visible memory is a tightly packed array the way a Shared-storage
+  `Buffer`'s is (rows can be padded/tiled internally), so there's no
+  `Buffer.contents` equivalent. `.upload()`/`.download()` (and `.numpy()`/
+  `__array__`, which call `.download()`) are genuine copies via
+  `MTL::Texture`'s `replaceRegion`/`getBytes`.
+- **`shape` excludes the channel count on input, includes it on output.**
+  `device.empty_texture(shape, pixel_format)` takes a *spatial* shape only
+  -- `(width,)`, `(height, width)`, or `(depth, height, width)` -- with
+  channel count implied by `pixel_format` (`"rgba8Unorm"` is 4-channel,
+  `"r32Float"` is 1-channel). `Texture.shape` (and what `.download()`
+  returns) appends a trailing channel dim when `channels > 1`, matching
+  common image-array conventions. `empty_texture` raises if a 3-element
+  `shape` looks like it still has that channel axis attached (its last
+  element equals the format's channel count) -- if you have an `(H, W, C)`
+  array, either use `device.texture(data, pixel_format)` (which strips it
+  for you) or pass `shape[:-1]`.
+- **Pixel formats, not dtypes.** A small, deliberately non-exhaustive set
+  covering 8-bit and float image data (Metal defines 100+ pixel formats,
+  most for graphics rather than compute): `r8Unorm`, `rgba8Unorm`,
+  `r16Float`, `rgba16Float`, `r32Float`, `rgba32Float`, `r32Uint`,
+  `rgba32Uint` (`src/mtlpy/utils.py`). `Unorm` formats store small integers
+  but kernels read/write them as `float` in `[0, 1]` -- Metal normalizes
+  automatically; `shader.texture_type(dims, msl_scalar_type, access)`
+  generates the right MSL type string (`texture2d<float, access::sample>`,
+  etc.) if you don't want to hand-write it.
+
 ## Reusing buffers in a hot loop
 
 `Buffer.contents` is a live NumPy view over the same underlying Metal
@@ -230,6 +358,11 @@ pytest tests/
 - `test_async.py` — `wait=False` dispatch ordering.
 - `test_buffer_reuse.py` — in-place `.contents` writes and repeated dispatch
   against the same buffers, without reallocation.
+- `test_shapes.py` — `.shape`, `.reshape()`, `.numpy()`, and `__array__`,
+  including that `.contents` stays flat and elementwise ops preserve shape.
+- `test_texture.py` — texture creation/shape across pixel formats and
+  dimensionalities, upload/download roundtrips, a read-write compute kernel,
+  and a sampling kernel (multi-texture + sampler binding).
 - `test_stability.py` — repeated-dispatch and object-lifetime stress tests
   (regression coverage for the Metal object-ownership rules in `csrc/`),
   plus multi-threaded dispatch/compilation tests (`Pipeline.run` releases

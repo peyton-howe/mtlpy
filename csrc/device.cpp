@@ -2,6 +2,8 @@
 #include "buffer.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
+#include "sampler.h"
+#include "texture.h"
 #include <stdexcept>
 
 namespace mtlpy {
@@ -50,7 +52,17 @@ Buffer* Device::create_buffer(size_t size_bytes) {
 
 Pipeline* Device::compile(const std::string& source, const std::string& function_name) {
     auto cached = cache_->get_or_create(device_, source, function_name);
-    return new Pipeline(cached.state, queue_, cached.required_buffer_count);
+    return new Pipeline(cached.state, queue_, cached.required_buffer_count,
+                         cached.required_texture_count, cached.required_sampler_count);
+}
+
+Texture* Device::create_texture(uint32_t dims, uint32_t pixel_format,
+                                 uint32_t width, uint32_t height, uint32_t depth) {
+    return new Texture(device_, dims, pixel_format, width, height, depth);
+}
+
+Sampler* Device::create_sampler(bool linear, bool repeat) {
+    return new Sampler(device_, linear, repeat);
 }
 
 uint32_t Device::max_threads_per_threadgroup() const {

@@ -163,3 +163,17 @@ def ge_scalar_kernel(t: str) -> str: return _compare_scalar("ge_scalar", ">=", t
 def reduce_sum_kernel(t: str) -> str: return _reduce_pair("reduce_sum", "in[i] + in[i + 1]",         t)
 def reduce_max_kernel(t: str) -> str: return _reduce_pair("reduce_max", "max(in[i], in[i + 1])", t)
 def reduce_min_kernel(t: str) -> str: return _reduce_pair("reduce_min", "min(in[i], in[i + 1])", t)
+
+
+def texture_type(dims: int, scalar_t: str, access: str = "read_write") -> str:
+    """MSL texture type string for a custom kernel argument, e.g.
+    texture_type(2, "float", "sample") -> 'texture2d<float, access::sample>'.
+    scalar_t should be the pixel format's msl_scalar_type (see
+    utils.pixel_format_info); access is one of "read", "write",
+    "read_write", or "sample" (sampling requires a matching [[sampler(n)]]
+    argument bound via a Sampler passed to Pipeline.run(samplers=[...]))."""
+    try:
+        name = {1: "texture1d", 2: "texture2d", 3: "texture3d"}[dims]
+    except KeyError:
+        raise ValueError(f"dims must be 1, 2, or 3, got {dims}")
+    return f"{name}<{scalar_t}, access::{access}>"

@@ -8,11 +8,14 @@ namespace mtlpy {
 
 struct CachedPipeline {
     MTL::ComputePipelineState* state;
-    // One past the highest buffer-argument index the shader actually reads
-    // (from Metal's reflection info) -- i.e. the minimum number of buffers
-    // Pipeline::run() must be given. Address-space qualifier doesn't matter:
-    // both `device` and `constant` parameters report as ArgumentTypeBuffer.
+    // One past the highest active argument index the shader reads, per
+    // binding namespace (from Metal's reflection info) -- i.e. the minimum
+    // number of buffers/textures/samplers Pipeline::run() must be given.
+    // Address-space qualifier doesn't matter for buffers: both `device` and
+    // `constant` parameters report as ArgumentTypeBuffer.
     uint32_t required_buffer_count;
+    uint32_t required_texture_count;
+    uint32_t required_sampler_count;
 };
 
 class PipelineCache {

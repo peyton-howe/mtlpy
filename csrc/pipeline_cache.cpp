@@ -151,21 +151,37 @@ CachedPipeline PipelineCache::get_or_create(
 
     descriptor->release();
 
-    // One past the highest active buffer-argument index the shader reads --
-    // both `device` and `constant` parameters report as ArgumentTypeBuffer,
-    // so this covers both without needing to distinguish them.
-    uint32_t required_buffer_count = 0;
+    // One past the highest active argument index the shader reads, per
+    // binding namespace -- both `device` and `constant` buffer parameters
+    // report as ArgumentTypeBuffer, so that covers both without needing to
+    // distinguish them.
+    uint32_t required_buffer_count  = 0;
+    uint32_t required_texture_count = 0;
+    uint32_t required_sampler_count = 0;
     if (reflection) {
         auto* args = reflection->arguments();
         for (NS::UInteger i = 0; i < args->count(); ++i) {
             auto* arg = args->object<MTL::Argument>(i);
-            if (arg->type() == MTL::ArgumentTypeBuffer && arg->isActive())
-                required_buffer_count = std::max<uint32_t>(
-                    required_buffer_count, (uint32_t)arg->index() + 1);
+            if (!arg->isActive())
+                continue;
+            uint32_t index = (uint32_t)arg->index() + 1;
+            switch (arg->type()) {
+                case MTL::ArgumentTypeBuffer:
+                    required_buffer_count = std::max(required_buffer_count, index);
+                    break;
+                case MTL::ArgumentTypeTexture:
+                    required_texture_count = std::max(required_texture_count, index);
+                    break;
+                case MTL::ArgumentTypeSampler:
+                    required_sampler_count = std::max(required_sampler_count, index);
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
-    CachedPipeline cached{state, required_buffer_count};
+    CachedPipeline cached{state, required_buffer_count, required_texture_count, required_sampler_count};
     cache_[key] = cached;
     return cached;
 }
