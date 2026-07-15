@@ -11,6 +11,7 @@ class Pipeline;
 class PipelineCache;
 class Texture;
 class Sampler;
+class CommandBuffer;
 
 class Device {
 public:
@@ -58,6 +59,10 @@ public:
     void copy_texture(Texture* src, Texture* dst, bool wait);
 
     Sampler* create_sampler(bool linear, bool repeat);
+
+    // Lets multiple Pipeline::run() dispatches batch into one command-
+    // buffer submission -- see CommandBuffer's own doc comment.
+    CommandBuffer* create_command_buffer();
 
     uint32_t max_threads_per_threadgroup() const;
     void     flush_cache();

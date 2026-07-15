@@ -3,6 +3,7 @@
 #include <string>
 #include "device.h"
 #include "buffer.h"
+#include "command_buffer.h"
 #include "pipeline.h"
 #include "sampler.h"
 #include "texture.h"
@@ -48,7 +49,10 @@ PYBIND11_MODULE(_mtlpy, m) {
         .def("create_sampler", &Device::create_sampler,
              py::arg("linear"), py::arg("repeat"),
              py::return_value_policy::take_ownership,
-             py::keep_alive<0, 1>());  // keep Device alive while Sampler is alive
+             py::keep_alive<0, 1>())   // keep Device alive while Sampler is alive
+        .def("create_command_buffer", &Device::create_command_buffer,
+             py::return_value_policy::take_ownership,
+             py::keep_alive<0, 1>());  // keep Device alive while CommandBuffer is alive
 
     py::class_<Buffer>(m, "Buffer")
         .def_property_readonly("data_ptr", [](const Buffer& b) {
@@ -84,10 +88,18 @@ PYBIND11_MODULE(_mtlpy, m) {
 
     py::class_<Sampler>(m, "Sampler");
 
+    py::class_<CommandBuffer>(m, "CommandBuffer")
+        .def("commit", &CommandBuffer::commit,
+             py::arg("wait") = true,
+             // Same rationale as Pipeline::run's GIL release below -- this
+             // blocks on waitUntilCompleted() when wait=True.
+             py::call_guard<py::gil_scoped_release>());
+
     py::class_<Pipeline>(m, "Pipeline")
         .def("run", &Pipeline::run,
              py::arg("buffers"), py::arg("textures"), py::arg("samplers"),
              py::arg("grid"), py::arg("wait") = true,
+             py::arg("command_buffer") = nullptr,
              // Pipeline::run touches only raw C++/Metal state after argument
              // conversion (no PyObject* access), so it's safe to release the
              // GIL for the whole call -- otherwise a wait=True dispatch fully

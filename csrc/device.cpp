@@ -1,5 +1,7 @@
 #include "device.h"
 #include "buffer.h"
+#include "command_buffer.h"
+#include "metal_error.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
 #include "sampler.h"
@@ -31,12 +33,7 @@ void run_blit(MTL::CommandQueue* queue, bool wait,
 
     if (wait) {
         cmd->waitUntilCompleted();
-        if (cmd->status() == MTL::CommandBufferStatusError) {
-            std::string err = cmd->error()
-                ? cmd->error()->localizedDescription()->utf8String()
-                : "Unknown GPU error";
-            throw std::runtime_error(std::string(error_context) + " failed: " + err);
-        }
+        throw_if_command_buffer_error(cmd, error_context);
     }
 }
 
@@ -124,6 +121,10 @@ void Device::copy_texture(Texture* src, Texture* dst, bool wait) {
 
 Sampler* Device::create_sampler(bool linear, bool repeat) {
     return new Sampler(device_, linear, repeat);
+}
+
+CommandBuffer* Device::create_command_buffer() {
+    return new CommandBuffer(queue_);
 }
 
 uint32_t Device::max_threads_per_threadgroup() const {

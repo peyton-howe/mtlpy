@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from .buffer import Buffer
-from .pipeline import Pipeline
+from .pipeline import CommandBuffer, Pipeline
 from .texture import Sampler, Texture
 from . import utils, shader
 
@@ -183,6 +183,16 @@ class Device:
         out-of-bounds texture coordinates instead of clamping to the edge."""
         raw = self._dev.create_sampler(linear, repeat)
         return Sampler(raw, linear, repeat, self)
+
+    def command_buffer(self) -> CommandBuffer:
+        """A batch of Pipeline.run() dispatches that share one MTLCommandBuffer
+        submission -- see CommandBuffer's docstring for the context-manager
+        usage. Use this instead of separate Pipeline.run() calls when you
+        have multiple dispatches that always run together (e.g. a multi-pass
+        kernel), to pay one command-buffer-submit + wait instead of one per
+        dispatch."""
+        raw = self._dev.create_command_buffer()
+        return CommandBuffer(raw)
 
     def _binary_op(self, name: str, shader_fn, a: Buffer, b: Buffer, out: Buffer | None = None) -> Buffer:
         if a._device is not b._device:
