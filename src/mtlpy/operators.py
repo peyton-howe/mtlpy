@@ -7,7 +7,7 @@ from .buffer import Buffer
 def _unary(buf: Buffer, shader_fn, func_name: str) -> Buffer:
     metal_type = utils.to_metal(buf.dtype)
     pipeline   = buf._device.compile(shader_fn(metal_type), func_name)
-    out        = buf._device.empty(buf.size, buf.dtype)
+    out        = buf._device.empty(buf.shape, buf.dtype)
     pipeline.run([buf, out], buf.size)
     return out
 

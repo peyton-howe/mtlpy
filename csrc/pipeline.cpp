@@ -1,5 +1,7 @@
 #include "pipeline.h"
 #include "buffer.h"
+#include "sampler.h"
+#include "texture.h"
 #include <Foundation/NSAutoreleasePool.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -16,8 +18,12 @@ struct PoolGuard {
 } // namespace
 
 Pipeline::Pipeline(MTL::ComputePipelineState* state, MTL::CommandQueue* queue,
-                    uint32_t required_buffer_count)
-    : state_(state), queue_(queue), required_buffer_count_(required_buffer_count)
+                    uint32_t required_buffer_count, uint32_t required_texture_count,
+                    uint32_t required_sampler_count)
+    : state_(state), queue_(queue),
+      required_buffer_count_(required_buffer_count),
+      required_texture_count_(required_texture_count),
+      required_sampler_count_(required_sampler_count)
 {}
 
 uint32_t Pipeline::thread_execution_width() const {
@@ -51,8 +57,10 @@ MTL::Size Pipeline::compute_threadgroup_size(const std::array<uint32_t, 3>& grid
     return MTL::Size::Make(w, h, d);
 }
 
-void Pipeline::run(
+std::pair<double, double> Pipeline::run(
     const std::vector<Buffer*>&    buffers,
+    const std::vector<Texture*>&   textures,
+    const std::vector<Sampler*>&   samplers,
     const std::array<uint32_t, 3>& grid,
     bool                           wait
 ) {
@@ -62,6 +70,24 @@ void Pipeline::run(
             std::to_string(required_buffer_count_ - 1) + ", but only " +
             std::to_string(buffers.size()) +
             " buffer(s) were passed to run() -- an unbound buffer argument "
+            "is undefined behavior in Metal, not a safe no-op."
+        );
+    }
+    if (textures.size() < required_texture_count_) {
+        throw std::runtime_error(
+            "Kernel reads texture argument(s) up to index " +
+            std::to_string(required_texture_count_ - 1) + ", but only " +
+            std::to_string(textures.size()) +
+            " texture(s) were passed to run() -- an unbound texture argument "
+            "is undefined behavior in Metal, not a safe no-op."
+        );
+    }
+    if (samplers.size() < required_sampler_count_) {
+        throw std::runtime_error(
+            "Kernel reads sampler argument(s) up to index " +
+            std::to_string(required_sampler_count_ - 1) + ", but only " +
+            std::to_string(samplers.size()) +
+            " sampler(s) were passed to run() -- an unbound sampler argument "
             "is undefined behavior in Metal, not a safe no-op."
         );
     }
@@ -86,6 +112,10 @@ void Pipeline::run(
 
     for (size_t i = 0; i < buffers.size(); ++i)
         encoder->setBuffer(buffers[i]->mtl(), 0, i);
+    for (size_t i = 0; i < textures.size(); ++i)
+        encoder->setTexture(textures[i]->mtl(), i);
+    for (size_t i = 0; i < samplers.size(); ++i)
+        encoder->setSamplerState(samplers[i]->mtl(), i);
 
     MTL::Size grid_size         = MTL::Size::Make(grid[0], grid[1], grid[2]);
     MTL::Size threads_per_group = compute_threadgroup_size(grid);
@@ -103,7 +133,9 @@ void Pipeline::run(
                 : "Unknown GPU error";
             throw std::runtime_error("GPU execution failed: " + err);
         }
+        return {cmd->GPUStartTime(), cmd->GPUEndTime()};
     }
+    return {0.0, 0.0};
 }
 
 } // namespace mtlpy

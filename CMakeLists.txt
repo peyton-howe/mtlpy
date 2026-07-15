@@ -19,6 +19,8 @@ pybind11_add_module(_mtlpy
     csrc/device.cpp
     csrc/pipeline_cache.cpp
     csrc/buffer.cpp
+    csrc/texture.cpp
+    csrc/sampler.cpp
     csrc/pipeline.cpp
     csrc/bindings.cpp
 )

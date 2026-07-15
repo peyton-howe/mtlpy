@@ -9,11 +9,16 @@ class _BackedArray(np.ndarray):
 
 
 class Buffer:
-    def __init__(self, _buf, dtype: np.dtype, size: int, device):
+    def __init__(self, _buf, dtype: np.dtype, shape: tuple[int, ...], device):
         self._buf    = _buf             # _mtlpy.Buffer
         self.dtype   = np.dtype(dtype)
-        self.size    = size             # element count
+        self.shape   = tuple(shape)
         self._device = device           # Python Device (needed for ops)
+        # Computed once here, not as a property recomputed on every access:
+        # .shape is never mutated after construction (reshape() below always
+        # returns a new Buffer instead), so there's no desync risk from
+        # caching it
+        self.size    = utils.shape_size(self.shape)  # element count
 
     @property
     def contents(self) -> np.ndarray:
@@ -23,13 +28,47 @@ class Buffer:
         arr._mtlpy_buf = self           # keep Buffer alive while array is alive
         return arr
 
+    def numpy(self) -> np.ndarray:
+        """Contents reshaped to this Buffer's .shape -- unlike .contents
+        (always flat, see the property above), this looks like the array
+        you created the Buffer from. Zero-copy: reshaping a flat contiguous
+        array is always a view, never a copy, so this is just as live as
+        .contents and keeps this Buffer alive via the same backref."""
+        return self.contents.reshape(self.shape)
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        """Lets np.array(buf) / np.asarray(buf) work directly on a Buffer."""
+        arr = self.numpy()
+        needs_cast = dtype is not None and np.dtype(dtype) != arr.dtype
+        if needs_cast and copy is False:
+            raise ValueError(
+                f"Cannot convert Buffer's dtype ({arr.dtype}) to {np.dtype(dtype)} "
+                "without copying, but copy=False was requested"
+            )
+        if needs_cast:
+            return arr.astype(dtype)  # astype() always copies -- satisfies copy=True too
+        return arr.copy() if copy else arr
+
+    def reshape(self, *shape) -> Buffer:
+        """A new Buffer over the same underlying Metal allocation (no copy,
+        no reallocation) with a different logical .shape. Note that
+        .contents on the result is still flat -- only .shape/.numpy() see
+        the new shape, same as on the original Buffer."""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        shape = tuple(int(s) for s in shape)
+        new_size = utils.shape_size(shape)
+        if new_size != self.size:
+            raise ValueError(f"cannot reshape Buffer of size {self.size} into shape {shape}")
+        return Buffer(self._buf, self.dtype, shape, self._device)
+
     def astype(self, dtype) -> Buffer:
         dst_dtype  = utils.to_numpy(dtype)
         src_metal  = utils.to_metal(self.dtype)
         dst_metal  = utils.to_metal(dst_dtype)
         source     = shader.cast_kernel(src_metal, dst_metal)
         pipeline   = self._device.compile(source, "cast")
-        out        = self._device.empty(self.size, dst_dtype)
+        out        = self._device.empty(self.shape, dst_dtype)
         pipeline.run([self, out], self.size)
         return out
 
@@ -134,4 +173,4 @@ class Buffer:
         return self.size
 
     def __repr__(self) -> str:
-        return f"Buffer(size={self.size}, dtype={self.dtype})"
+        return f"Buffer(shape={self.shape}, dtype={self.dtype})"
