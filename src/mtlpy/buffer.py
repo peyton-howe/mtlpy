@@ -14,12 +14,11 @@ class Buffer:
         self.dtype   = np.dtype(dtype)
         self.shape   = tuple(shape)
         self._device = device           # Python Device (needed for ops)
-
-    @property
-    def size(self) -> int:
-        """Flat element count -- always derived from .shape, never stored
-        separately, so the two can't drift out of sync."""
-        return utils.shape_size(self.shape)
+        # Computed once here, not as a property recomputed on every access:
+        # .shape is never mutated after construction (reshape() below always
+        # returns a new Buffer instead), so there's no desync risk from
+        # caching it
+        self.size    = utils.shape_size(self.shape)  # element count
 
     @property
     def contents(self) -> np.ndarray:

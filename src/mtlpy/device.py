@@ -31,6 +31,13 @@ class Device:
         """index selects a specific GPU from list_devices() (for multi-GPU
         machines); the default (None) uses the system default GPU."""
         self._dev = _mtlpy.Device(-1 if index is None else index)
+        # Compiled texture_to_buffer_kernel Pipelines, keyed by the (dims,
+        # read_t, store_t, channels, normalized) signature buffer_from_texture()
+        # generates MSL source from -- avoids re-generating an identical
+        # source string and re-hitting the C++ PipelineCache's string-hash
+        # lookup on every to_buffer()/download_fast() call for the same
+        # texture shape/format (e.g. repeated per-frame GPU readback).
+        self._texture_to_buffer_pipelines: dict = {}
 
     def __enter__(self) -> Device:
         return self
@@ -96,14 +103,17 @@ class Device:
         if not readable and not writable:
             raise ValueError("A texture must be at least one of readable/writable")
         info = utils.pixel_format_info(pixel_format)
-        if info.channels > 1 and dims == 3 and shape[-1] == info.channels:
-            raise ValueError(
-                f"shape {shape} looks like it includes a trailing channel axis "
-                f"-- pixel_format {pixel_format!r} already implies {info.channels} "
-                f"channels, so shape should be spatial dims only (e.g. shape[:-1]). "
-                f"Use device.texture(data, pixel_format) to create+upload from an "
-                f"array that still has its channel axis."
-            )
+        # Note: this deliberately does NOT try to detect "shape still has a
+        # trailing channel axis" (e.g. a 2D (H, W, C) array's full shape
+        # passed by mistake) for dims==3 -- a prior version compared
+        # shape[-1] to info.channels, which also incorrectly rejected any
+        # *genuine* 3D texture whose width happened to equal the format's
+        # channel count (e.g. (10, 20, 4) for "rgba8Unorm", a real
+        # depth=10/height=20/width=4 volume texture). The two cases are not
+        # distinguishable from shape alone, and rejecting valid input is
+        # worse than missing a hint for a mistake -- use
+        # device.texture(data, pixel_format) for the "still has a channel
+        # axis" case instead, which strips it unambiguously.
         width  = shape[-1]
         height = shape[-2] if dims >= 2 else 1
         depth  = shape[-3] if dims >= 3 else 1
@@ -111,7 +121,8 @@ class Device:
                 (_TEXTURE_USAGE_SHADER_WRITE if writable else 0)
         raw = self._dev.create_texture(dims, info.mtl_value, width, height, depth,
                                         usage, private)
-        return Texture(raw, dims, pixel_format, width, height, depth, self)
+        return Texture(raw, dims, pixel_format, width, height, depth, self,
+                        readable=readable, writable=writable)
 
     def texture(self, data: np.ndarray, pixel_format: str) -> Texture:
         """Create a texture matching data's shape and upload it in one call.
@@ -132,22 +143,38 @@ class Device:
         side, landing the result in a genuinely zero-copy Buffer.contents/
         .numpy() with no further CPU copy needed. See shader.
         texture_to_buffer_kernel for why this needs both tex's MSL read type
-        and its narrower storage type."""
-        if tex.normalized:
-            raise NotImplementedError(
-                f"buffer_from_texture doesn't support normalized pixel format "
-                f"{tex.pixel_format!r} yet (would need a *255+round conversion in "
-                f"the copy kernel to reproduce the original integer storage) -- use "
-                f"a raw Uint/Float pixel format (e.g. r8Uint instead of r8Unorm), or "
-                f"tex.download(), which does handle Unorm."
+        and its narrower storage type.
+
+        Requires tex.readable (raises otherwise): the copy kernel does
+        texture.read(), which needs MTLTextureUsageShaderRead -- a texture
+        created via Device.empty_texture(readable=False, ...) doesn't have
+        it, and Metal would otherwise fail the dispatch with an opaque
+        validation error instead of this clear message."""
+        if tex._device is not self:
+            raise ValueError(
+                "Texture belongs to a different Device instance -- Metal does not "
+                "allow referencing resources from different MTLDevice objects in "
+                "the same command buffer"
             )
-        store_t  = utils.msl_storage_type(tex.dtype)
-        source   = shader.texture_to_buffer_kernel(tex.dims, tex.msl_scalar_type, store_t, tex.channels)
-        pipeline = self.compile(source, "texture_to_buffer")
-        out      = self.empty(tex.shape, tex.dtype)
-        grid     = [tex.width,
-                    tex.height if tex.dims >= 2 else 1,
-                    tex.depth  if tex.dims >= 3 else 1]
+        if not tex.readable:
+            raise ValueError(
+                f"Texture was created with readable=False (see "
+                f"Device.empty_texture()), so it lacks MTLTextureUsageShaderRead -- "
+                f"buffer_from_texture()'s copy kernel needs to read it. Create the "
+                f"texture with readable=True (the default) to read it back this way."
+            )
+        store_t   = utils.msl_storage_type(tex.dtype)
+        cache_key = (tex.dims, tex.msl_scalar_type, store_t, tex.channels, tex.normalized)
+        pipeline  = self._texture_to_buffer_pipelines.get(cache_key)
+        if pipeline is None:
+            source   = shader.texture_to_buffer_kernel(
+                tex.dims, tex.msl_scalar_type, store_t, tex.channels, tex.normalized)
+            pipeline = self.compile(source, "texture_to_buffer")
+            self._texture_to_buffer_pipelines[cache_key] = pipeline
+        out  = self.empty(tex.shape, tex.dtype)
+        grid = [tex.width,
+                tex.height if tex.dims >= 2 else 1,
+                tex.depth  if tex.dims >= 3 else 1]
         pipeline.run([out], grid, textures=[tex])
         return out
 

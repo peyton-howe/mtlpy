@@ -11,7 +11,8 @@ class Texture:
     replaceRegion/getBytes, not a live view over GPU memory."""
 
     def __init__(self, _tex, dims: int, pixel_format: str,
-                 width: int, height: int, depth: int, device):
+                 width: int, height: int, depth: int, device,
+                 readable: bool = True, writable: bool = True):
         self._tex         = _tex          # _mtlpy.Texture
         self.dims         = dims
         self.pixel_format = pixel_format
@@ -24,6 +25,14 @@ class Texture:
         self.normalized       = info.normalized
         self.msl_scalar_type  = info.msl_scalar_type
         self.is_private       = _tex.is_private
+        # What Device.empty_texture()'s readable/writable declared this
+        # texture's MTLTextureUsage as -- checked by buffer_from_texture()
+        # before generating a kernel that does texture.read(), since a
+        # texture created with readable=False lacks MTLTextureUsageShaderRead
+        # and Metal rejects the dispatch (previously an opaque GPU-side
+        # validation failure instead of a clear Python exception).
+        self.readable          = readable
+        self.writable          = writable
         self._device          = device
 
     @property
@@ -47,9 +56,26 @@ class Texture:
         bytes_per_image = self.height * bytes_per_row if self.dims == 3 else 0
         return bytes_per_row, bytes_per_image
 
-    def upload(self, data: np.ndarray) -> None:
+    def _check_data_shape(self, data: np.ndarray) -> None:
         if data.shape != self.shape:
             raise ValueError(f"Data shape {data.shape} does not match texture shape {self.shape}")
+
+    def _check_same_device(self, other: "Buffer | Texture", kind: str) -> None:
+        # Metal forbids referencing resources from different MTLDevices in
+        # one command buffer -- same invariant Device._binary_op/_compare_op
+        # enforce for Buffer-Buffer ops (device.py), extended here to the
+        # new Texture<->Buffer/Texture<->Texture GPU-side paths. Without
+        # this, a mismatched device crashes inside Metal's validation layer
+        # instead of raising a catchable Python exception.
+        if other._device is not self._device:
+            raise ValueError(
+                f"{kind} belongs to a different Device instance -- Metal does not "
+                f"allow referencing resources from different MTLDevice objects in "
+                f"the same command buffer"
+            )
+
+    def upload(self, data: np.ndarray) -> None:
+        self._check_data_shape(data)
         arr = np.ascontiguousarray(data, dtype=self.dtype)
         bytes_per_row, bytes_per_image = self._bytes_per_row_and_image()
         self._tex.upload(arr, bytes_per_row, bytes_per_image)
@@ -65,8 +91,7 @@ class Texture:
         Buffer once and call upload_from_buffer() directly instead (same
         allocate-once tradeoff as Buffer's own out-of-place convenience ops
         -- see the README's "Reusing buffers in a hot loop")."""
-        if data.shape != self.shape:
-            raise ValueError(f"Data shape {data.shape} does not match texture shape {self.shape}")
+        self._check_data_shape(data)
         arr = np.ascontiguousarray(data, dtype=self.dtype)
         buf = self._device.buffer(arr)
         self.upload_from_buffer(buf, wait=wait)
@@ -81,21 +106,24 @@ class Texture:
 
         buf must already hold this texture's data tightly packed (same
         convention .upload() expects from an ndarray: dtype matching this
-        texture's per-channel dtype, element count matching
-        shape_size(self.shape)) -- write it there with a plain
-        buf.contents[:] = ... first, an ordinary linear CPU memcpy. offset
-        is a byte offset into buf, for reusing one buffer to stage more
-        than one texture's data."""
-        expected_elements = utils.shape_size(self.shape)
+        texture's per-channel dtype) starting at a byte offset into buf --
+        write it there with a plain buf.contents[:] = ... first, an
+        ordinary linear CPU memcpy. offset lets one larger buffer stage more
+        than one texture's data (e.g. buf sized for two textures, the second
+        uploaded via offset=first_texture_nbytes)."""
+        self._check_same_device(buf, "Buffer")
+        expected_bytes = utils.shape_size(self.shape) * self.dtype.itemsize
         if buf.dtype != self.dtype:
             raise TypeError(
                 f"Buffer dtype {buf.dtype} doesn't match texture pixel_format "
                 f"{self.pixel_format!r}'s per-channel dtype {self.dtype}"
             )
-        if buf.size != expected_elements:
+        buf_bytes = buf.size * buf.dtype.itemsize
+        if offset + expected_bytes > buf_bytes:
             raise ValueError(
-                f"Buffer has {buf.size} elements, but this {self.shape} texture "
-                f"needs {expected_elements}"
+                f"Buffer has {buf_bytes} bytes, but offset={offset} plus this "
+                f"{self.shape} texture's {expected_bytes} bytes needs "
+                f"{offset + expected_bytes}"
             )
         bytes_per_row, bytes_per_image = self._bytes_per_row_and_image()
         self._device._dev.blit_upload_texture(
@@ -125,6 +153,7 @@ class Texture:
         dst must already exist with the same pixel_format and shape as
         self (create it with Device.empty_texture() first) -- this copies
         into an existing texture, it doesn't allocate one."""
+        self._check_same_device(dst, "Destination texture")
         if dst.pixel_format != self.pixel_format:
             raise TypeError(
                 f"Destination pixel_format {dst.pixel_format!r} doesn't match "
@@ -152,16 +181,17 @@ class Texture:
         via a GPU-side compute-kernel copy into a Buffer, then that Buffer's
         already-zero-copy .numpy(), instead of .download()'s CPU-side
         getBytes() copy -- measured ~1.5-1.6x faster at 1080p/4K, and unlike
-        .download(), works on a private=True texture too. Inherits
-        to_buffer()'s one restriction: raises NotImplementedError for a
-        normalized (Unorm) pixel_format -- use .download() for those."""
+        .download(), works on a private=True texture too."""
         return self.to_buffer().numpy()
 
     def to_buffer(self) -> "Buffer":
         """GPU-side readback into a tightly packed Buffer (see
         Device.buffer_from_texture()), instead of the CPU-side getBytes()
         copy .download()/.numpy() use -- the result's .contents/.numpy()
-        are genuinely zero-copy, same as any other Buffer."""
+        are genuinely zero-copy, same as any other Buffer. Requires
+        self.readable (raises otherwise -- a texture created with
+        readable=False lacks the MTLTextureUsageShaderRead the copy kernel
+        needs)."""
         return self._device.buffer_from_texture(self)
 
     def __array__(self, dtype=None, copy=None) -> np.ndarray:

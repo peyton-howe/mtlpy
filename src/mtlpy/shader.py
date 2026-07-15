@@ -165,7 +165,8 @@ def reduce_max_kernel(t: str) -> str: return _reduce_pair("reduce_max", "max(in[
 def reduce_min_kernel(t: str) -> str: return _reduce_pair("reduce_min", "min(in[i], in[i + 1])", t)
 
 
-def texture_to_buffer_kernel(dims: int, read_t: str, store_t: str, channels: int) -> str:
+def texture_to_buffer_kernel(dims: int, read_t: str, store_t: str, channels: int,
+                              normalized: bool = False) -> str:
     """GPU-side texture readback: copies a texture's pixels into a tightly
     packed linear buffer via a compute dispatch (see
     Device.buffer_from_texture()), instead of the CPU-side getBytes() copy
@@ -179,7 +180,16 @@ def texture_to_buffer_kernel(dims: int, read_t: str, store_t: str, channels: int
     always widens integer/half texture reads to a full register-width type
     in the shader). store_t is the narrower type matching the format's
     actual per-texel storage width (utils.msl_storage_type, e.g. "uchar"),
-    so the output buffer is packed at the storage width, not the read width."""
+    so the output buffer is packed at the storage width, not the read width.
+
+    normalized=True is for Unorm pixel formats (utils.pixel_format_info's
+    `normalized` flag): MSL decodes those as a float in [0, 1] regardless of
+    the underlying integer storage width, so reconstructing the original
+    stored integer needs round(v * 255.0) -- the same exact conversion this
+    project's benchmarks/bayer2rgb_ea_texture_kernel.txt documents for the
+    same reason. Only 8-bit Unorm formats exist in utils.py's pixel format
+    table today, hence the hardcoded 255.0; a future 16-bit Unorm format
+    would need this generalized to the store type's max value."""
     tex_t   = texture_type(dims, read_t, "read")
     read_v  = read_t  if channels == 1 else f"{read_t}4"
     store_v = store_t if channels == 1 else f"{store_t}4"
@@ -190,6 +200,7 @@ def texture_to_buffer_kernel(dims: int, read_t: str, store_t: str, channels: int
         3: "(id.z * tex.get_height() + id.y) * tex.get_width() + id.x",
     }[dims]
     read_expr = "tex.read(coord).r" if channels == 1 else "tex.read(coord)"
+    convert = f"{store_v}(round(v * 255.0))" if normalized else f"{store_v}(v)"
     return f"""
 #include <metal_stdlib>
 using namespace metal;
@@ -200,7 +211,7 @@ kernel void texture_to_buffer(
 {{
     auto coord = {coord};
     {read_v} v = {read_expr};
-    out[{index}] = {store_v}(v);
+    out[{index}] = {convert};
 }}
 """
 

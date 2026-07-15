@@ -62,13 +62,16 @@ def test_upload_download_roundtrip_1d(device):
     np.testing.assert_allclose(tex.download(), data, atol=1e-6)
 
 
-def test_empty_texture_rejects_shape_with_channel_axis(device):
-    # (256, 256, 4) for a 4-channel format looks like an (H, W, C) array
-    # someone forgot to strip the channel axis from, not a genuine 3D
-    # texture request -- must raise rather than silently building a
-    # transposed 3D texture.
-    with pytest.raises(ValueError):
-        device.empty_texture((8, 8, 4), "rgba8Unorm")
+def test_empty_texture_3d_width_matching_channel_count_is_not_rejected(device):
+    # (8, 8, 4) for a 4-channel format is ambiguous from shape alone: it
+    # could be an (H, W, C) array someone forgot to strip the channel axis
+    # from, or a genuine depth=8/height=8/width=4 3D texture request.
+    tex = device.empty_texture((8, 8, 4), "rgba8Unorm")
+    assert tex.dims == 3
+    assert (tex.depth, tex.height, tex.width) == (8, 8, 4)
+    # .shape reports the *spatial* shape (8, 8, 4) plus rgba8Unorm's own
+    # trailing channel axis, per Texture.shape's documented convention.
+    assert tex.shape == (8, 8, 4, 4)
 
 
 def test_device_texture_from_ndarray(device):

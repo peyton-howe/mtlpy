@@ -4,9 +4,43 @@
 #include "pipeline_cache.h"
 #include "sampler.h"
 #include "texture.h"
+#include <functional>
 #include <stdexcept>
 
 namespace mtlpy {
+
+namespace {
+
+// Shared by every blit-only Device method below (blit_upload_texture,
+// optimize_texture_for_gpu_access, copy_texture): encode takes the one
+// call as a lambda, error_context labels which operation failed if it does.
+void run_blit(MTL::CommandQueue* queue, bool wait,
+              const std::function<void(MTL::BlitCommandEncoder*)>& encode,
+              const char* error_context) {
+    auto* cmd = queue->commandBuffer();
+    if (!cmd)
+        throw std::runtime_error("Failed to create Metal command buffer");
+
+    auto* blit = cmd->blitCommandEncoder();
+    if (!blit)
+        throw std::runtime_error("Failed to create Metal blit command encoder");
+
+    encode(blit);
+    blit->endEncoding();
+    cmd->commit();
+
+    if (wait) {
+        cmd->waitUntilCompleted();
+        if (cmd->status() == MTL::CommandBufferStatusError) {
+            std::string err = cmd->error()
+                ? cmd->error()->localizedDescription()->utf8String()
+                : "Unknown GPU error";
+            throw std::runtime_error(std::string(error_context) + " failed: " + err);
+        }
+    }
+}
+
+} // namespace
 
 Device::Device(int index) {
     if (index < 0) {
@@ -64,82 +98,28 @@ Texture* Device::create_texture(uint32_t dims, uint32_t pixel_format,
 
 void Device::blit_upload_texture(Buffer* buf, size_t offset, Texture* tex,
                                   size_t bytes_per_row, size_t bytes_per_image, bool wait) {
-    auto* cmd = queue_->commandBuffer();
-    if (!cmd)
-        throw std::runtime_error("Failed to create Metal command buffer");
-
-    auto* blit = cmd->blitCommandEncoder();
-    if (!blit)
-        throw std::runtime_error("Failed to create Metal blit command encoder");
-
     MTL::Size size = MTL::Size::Make(
         tex->width(),
         tex->dims() >= 2 ? tex->height() : 1,
         tex->dims() >= 3 ? tex->depth()  : 1
     );
-    blit->copyFromBuffer(buf->mtl(), offset, bytes_per_row, bytes_per_image, size,
-                          tex->mtl(), /*destinationSlice=*/0, /*destinationLevel=*/0,
-                          MTL::Origin(0, 0, 0));
-    blit->endEncoding();
-    cmd->commit();
-
-    if (wait) {
-        cmd->waitUntilCompleted();
-        if (cmd->status() == MTL::CommandBufferStatusError) {
-            std::string err = cmd->error()
-                ? cmd->error()->localizedDescription()->utf8String()
-                : "Unknown GPU error";
-            throw std::runtime_error("GPU blit upload failed: " + err);
-        }
-    }
+    run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
+        blit->copyFromBuffer(buf->mtl(), offset, bytes_per_row, bytes_per_image, size,
+                              tex->mtl(), /*destinationSlice=*/0, /*destinationLevel=*/0,
+                              MTL::Origin(0, 0, 0));
+    }, "GPU blit upload");
 }
 
 void Device::optimize_texture_for_gpu_access(Texture* tex, bool wait) {
-    auto* cmd = queue_->commandBuffer();
-    if (!cmd)
-        throw std::runtime_error("Failed to create Metal command buffer");
-
-    auto* blit = cmd->blitCommandEncoder();
-    if (!blit)
-        throw std::runtime_error("Failed to create Metal blit command encoder");
-
-    blit->optimizeContentsForGPUAccess(tex->mtl());
-    blit->endEncoding();
-    cmd->commit();
-
-    if (wait) {
-        cmd->waitUntilCompleted();
-        if (cmd->status() == MTL::CommandBufferStatusError) {
-            std::string err = cmd->error()
-                ? cmd->error()->localizedDescription()->utf8String()
-                : "Unknown GPU error";
-            throw std::runtime_error("GPU texture optimization failed: " + err);
-        }
-    }
+    run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
+        blit->optimizeContentsForGPUAccess(tex->mtl());
+    }, "GPU texture optimization");
 }
 
 void Device::copy_texture(Texture* src, Texture* dst, bool wait) {
-    auto* cmd = queue_->commandBuffer();
-    if (!cmd)
-        throw std::runtime_error("Failed to create Metal command buffer");
-
-    auto* blit = cmd->blitCommandEncoder();
-    if (!blit)
-        throw std::runtime_error("Failed to create Metal blit command encoder");
-
-    blit->copyFromTexture(src->mtl(), dst->mtl());
-    blit->endEncoding();
-    cmd->commit();
-
-    if (wait) {
-        cmd->waitUntilCompleted();
-        if (cmd->status() == MTL::CommandBufferStatusError) {
-            std::string err = cmd->error()
-                ? cmd->error()->localizedDescription()->utf8String()
-                : "Unknown GPU error";
-            throw std::runtime_error("GPU texture-to-texture copy failed: " + err);
-        }
-    }
+    run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
+        blit->copyFromTexture(src->mtl(), dst->mtl());
+    }, "GPU texture-to-texture copy");
 }
 
 Sampler* Device::create_sampler(bool linear, bool repeat) {
