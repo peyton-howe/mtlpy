@@ -22,6 +22,7 @@ pybind11_add_module(_mtlpy
     csrc/texture.cpp
     csrc/sampler.cpp
     csrc/pipeline.cpp
+    csrc/command_buffer.cpp
     csrc/bindings.cpp
 )
 

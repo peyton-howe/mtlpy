@@ -50,6 +50,8 @@ csrc/                C++ extension (pybind11 + metal-cpp)
   texture.{h,cpp}      MTL::Texture wrapper (1D/2D/3D)
   sampler.{h,cpp}      MTL::SamplerState wrapper
   pipeline.{h,cpp}     Dispatches a compiled MTL::ComputePipelineState
+  command_buffer.{h,cpp}  Batches multiple Pipeline::run() dispatches into
+                          one MTL::CommandBuffer submission
   pipeline_cache.{h,cpp}  Compiles-once cache, keyed on (source, function name),
                           backed by an on-disk MTL::BinaryArchive
   metal_impl.mm        Single Obj-C++ translation unit providing the
@@ -59,7 +61,7 @@ src/mtlpy/          Python package (src layout, for PyPI)
   device.py            Device: buffer/empty/texture/sampler/compile, list_devices(), wraps _mtlpy.Device
   buffer.py             Buffer: NumPy-backed contents, arithmetic/comparison/in-place operators
   texture.py             Texture, Sampler: wrap _mtlpy.Texture/_mtlpy.Sampler
-  pipeline.py           Pipeline: thin wrapper over _mtlpy.Pipeline
+  pipeline.py           Pipeline, CommandBuffer: thin wrappers over _mtlpy.Pipeline/CommandBuffer
   operators.py          sqrt/cos/sin/tan/exp/log, sum/max/min/mean reductions
   shader.py             Generates Metal Shading Language source per dtype/texture type
   utils.py              NumPy dtype <-> Metal type/pixel format mapping
@@ -124,6 +126,9 @@ new data into it via `buf.contents[:] = arr` is still a real memcpy from
   `examples/async_dispatch.py`). `Pipeline.run` releases the GIL for the
   whole call, so other Python threads keep running during the GPU wait
   instead of being blocked for its full duration.
+- **Batched dispatches**: `Device.command_buffer()` batches multiple
+  `Pipeline.run()` calls into one `MTLCommandBuffer` submission instead of
+  one per dispatch -- see [Batching dispatches](#batching-dispatches) below.
 - **Multi-GPU support**: `mtlpy.list_devices()` lists every Metal-capable GPU
   on the machine; `mtlpy.Device(index=...)` selects one (the default targets
   the system default GPU).
@@ -371,6 +376,64 @@ tight loop. The in-place operators (`a += b`, `a *= 2.0`, ...) do reuse `a`'s
 own buffer with no extra allocation, if that fits your loop. See
 `examples/reuse_buffers.py`.
 
+## Batching dispatches
+
+Each `Pipeline.run()` call submits its own `MTLCommandBuffer` by default —
+one command-buffer-create + commit + (if `wait=True`) `waitUntilCompleted()`
+round trip per dispatch. For a fixed sequence of dispatches that always run
+together (a multi-pass kernel, or any "run these N things then read the
+result" pattern), `Device.command_buffer()` batches them into one submission
+instead, as a context manager:
+
+```python
+with device.command_buffer() as cb:
+    horizontal_pass.run([], grid, textures=[src, mid], cb=cb)
+    vertical_pass.run([], grid, textures=[mid, dst], cb=cb)
+# one submit, one wait, covering both dispatches
+```
+
+`Pipeline.run(..., cb=cb)` encodes into `cb`'s shared encoder instead of
+committing its own command buffer — `wait` is ignored in that case (you
+can't partially wait on part of a not-yet-committed command buffer), and it
+always returns `(0.0, 0.0)`: per-dispatch GPU timing isn't meaningful once
+dispatches share a command buffer, only `cb.commit()`'s combined timing is.
+The `with` block commits (and waits, by default) on normal exit; if the
+block raises, it does *not* commit — a partially-encoded batch is discarded
+rather than submitted, the same way a database transaction rolls back on
+exception instead of committing a partial write. Measured ~2x faster than
+two separate `wait=True` dispatches for a two-pass texture kernel.
+
+Without a context manager: `cb = device.command_buffer()`, encode dispatches
+into it the same way, then `cb.commit(wait=True)` (the default) or
+`cb.commit(wait=False)` to defer waiting the same way `Pipeline.run(...,
+wait=False)` does — a later `wait=True` dispatch on the same queue still
+guarantees this batch finished first (Metal retires command buffers on a
+queue in commit order). Calling `.commit()` more than once, or encoding into
+a `CommandBuffer` after it's committed, raises `RuntimeError`.
+
+**`CommandBuffer` vs. a plain `wait=False` chain** (see [Async
+dispatch](#features) above): both avoid stalling between dependent
+dispatches, but they're not interchangeable —
+
+- Back-to-back dispatches with no CPU-side work between them: roughly tied
+  either way.
+- CPU-side work between dispatches (e.g. computing the next dispatch's
+  arguments): a `wait=False` chain wins, measured ~1.2x faster for a 4K
+  two-pass kernel with 2ms of CPU work in between. `wait=False` *submits*
+  immediately, so the GPU starts executing that dispatch while the CPU is
+  still busy; `CommandBuffer` batching defers *all* submission until
+  `commit()`, so the GPU sits idle until the whole batch has been encoded.
+- Sequence not known upfront (the next dispatch depends on inspecting
+  something first): only a `wait=False` chain fits -- nothing in a
+  `CommandBuffer` batch executes until it's fully encoded and committed, so
+  you can't make encoding decisions based on an earlier batched dispatch's
+  result without breaking the batch anyway.
+
+`CommandBuffer` is the better fit for a fixed, known-upfront sequence with
+little CPU work in between (its original motivating case: a multi-pass
+kernel). A `wait=False` chain remains the right tool when there's real work
+to overlap with GPU execution, or the sequence is decided dynamically.
+
 ## Testing
 
 ```bash
@@ -412,13 +475,6 @@ can baseline future changes:
 ```bash
 python benchmarks/bench.py --baseline benchmarks/results/<earlier-run>.json
 ```
-
-`benchmarks/demosaic_bench.py` is a separate, more involved benchmark
-comparing the edge-aware Bayer demosaicing kernel
-(`benchmarks/bayer2rgb_ea_kernel.txt`) against OpenCV's own
-`COLOR_Bayer*2BGR_EA` (requires `pip install -e ".[bench]"`), covering both
-single-shot dispatch latency and realistic streaming throughput (a rotating
-buffer pool pipelining dispatches instead of waiting on every frame).
 
 ## License
 
