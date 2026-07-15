@@ -72,7 +72,7 @@ def test_empty_texture_rejects_shape_with_channel_axis(device):
 
 
 def test_device_texture_from_ndarray(device):
-    img = np.arange(4 * 6 * 4, dtype=np.uint8).reshape(4, 6, 4) % 256
+    img = np.arange(4 * 6 * 4, dtype=np.uint8).reshape(4, 6, 4)
     tex = device.texture(img, "rgba8Unorm")
     assert tex.shape == (4, 6, 4)
     np.testing.assert_array_equal(tex.download(), img)
