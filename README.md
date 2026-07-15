@@ -476,13 +476,6 @@ can baseline future changes:
 python benchmarks/bench.py --baseline benchmarks/results/<earlier-run>.json
 ```
 
-`benchmarks/demosaic_bench.py` is a separate, more involved benchmark
-comparing the edge-aware Bayer demosaicing kernel
-(`benchmarks/bayer2rgb_ea_kernel.txt`) against OpenCV's own
-`COLOR_Bayer*2BGR_EA` (requires `pip install -e ".[bench]"`), covering both
-single-shot dispatch latency and realistic streaming throughput (a rotating
-buffer pool pipelining dispatches instead of waiting on every frame).
-
 ## License
 
 MIT
