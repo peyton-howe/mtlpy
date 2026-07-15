@@ -56,6 +56,8 @@ def to_numpy(hint) -> np.dtype:
 _PIXEL_FORMAT_TABLE = [
     ("r8Unorm",     10,  1, np.uint8,   True,  "float"),
     ("rgba8Unorm",  70,  4, np.uint8,   True,  "float"),
+    ("r8Uint",      13,  1, np.uint8,   False, "uint"),
+    ("rgba8Uint",   73,  4, np.uint8,   False, "uint"),
     ("r16Float",    25,  1, np.float16, False, "half"),
     ("rgba16Float", 115, 4, np.float16, False, "half"),
     ("r32Float",    55,  1, np.float32, False, "float"),
@@ -84,3 +86,29 @@ def pixel_format_info(name: str) -> PixelFormatInfo:
         raise ValueError(
             f"Unknown pixel format: '{name}'. Supported: {sorted(_PIXEL_FORMATS)}"
         )
+
+
+# MSL type name matching a dtype's storage width exactly -- unlike to_metal()
+# above (which maps to a *register*-width type for elementwise Buffer ops,
+# and has no uint8 entry at all, since there's no 8-bit MSL arithmetic type),
+# this is for packing a buffer at a pixel format's actual per-texel storage
+# width, which is narrower than the type MSL widens texture reads to (e.g.
+# an 8-bit Uint texture reads as "uint" in a kernel, but stores as "uchar").
+_STORAGE_TYPE = {
+    np.dtype(np.uint8):   "uchar",
+    np.dtype(np.int8):    "char",
+    np.dtype(np.uint16):  "ushort",
+    np.dtype(np.int16):   "short",
+    np.dtype(np.uint32):  "uint",
+    np.dtype(np.int32):   "int",
+    np.dtype(np.float16): "half",
+    np.dtype(np.float32): "float",
+}
+
+
+def msl_storage_type(dtype) -> str:
+    dt = np.dtype(dtype)
+    try:
+        return _STORAGE_TYPE[dt]
+    except KeyError:
+        raise TypeError(f"No MSL storage type for dtype: {dt}")

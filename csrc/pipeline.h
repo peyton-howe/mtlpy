@@ -1,6 +1,7 @@
 #pragma once
 #include <Metal/Metal.hpp>
 #include <array>
+#include <utility>
 #include <vector>
 
 namespace mtlpy {
@@ -20,7 +21,14 @@ public:
     // in Metal Shading Language ([[buffer(n)]] / [[texture(n)]] /
     // [[sampler(n)]]) -- each list here is bound by its own position, same
     // convention as buffers already used (list index i -> binding i).
-    void run(
+    //
+    // Returns (gpu_start, gpu_end) in seconds, from MTLCommandBuffer's
+    // GPUStartTime/GPUEndTime -- pure device-side execution time, excluding
+    // CPU-side encoding/dispatch overhead and (when wait=true) the
+    // waitUntilCompleted() latency itself. Only valid when wait=true (the
+    // command buffer hasn't necessarily even started on the GPU, let alone
+    // finished, until it completes); (0, 0) when wait=false.
+    std::pair<double, double> run(
         const std::vector<Buffer*>&      buffers,
         const std::vector<Texture*>&     textures,
         const std::vector<Sampler*>&     samplers,

@@ -30,8 +30,21 @@ PYBIND11_MODULE(_mtlpy, m) {
         .def("create_texture", &Device::create_texture,
              py::arg("dims"), py::arg("pixel_format"),
              py::arg("width"), py::arg("height"), py::arg("depth"),
+             py::arg("usage"), py::arg("private_storage"),
              py::return_value_policy::take_ownership,
              py::keep_alive<0, 1>())   // keep Device alive while Texture is alive
+        .def("blit_upload_texture", &Device::blit_upload_texture,
+             py::arg("buf"), py::arg("offset"), py::arg("tex"),
+             py::arg("bytes_per_row"), py::arg("bytes_per_image"), py::arg("wait"),
+             // Same rationale as Pipeline::run's GIL release above -- this
+             // blocks on waitUntilCompleted() when wait=True.
+             py::call_guard<py::gil_scoped_release>())
+        .def("optimize_texture_for_gpu_access", &Device::optimize_texture_for_gpu_access,
+             py::arg("tex"), py::arg("wait"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("copy_texture", &Device::copy_texture,
+             py::arg("src"), py::arg("dst"), py::arg("wait"),
+             py::call_guard<py::gil_scoped_release>())
         .def("create_sampler", &Device::create_sampler,
              py::arg("linear"), py::arg("repeat"),
              py::return_value_policy::take_ownership,
@@ -66,7 +79,8 @@ PYBIND11_MODULE(_mtlpy, m) {
         .def_property_readonly("width",  &Texture::width)
         .def_property_readonly("height", &Texture::height)
         .def_property_readonly("depth",  &Texture::depth)
-        .def_property_readonly("dims",   &Texture::dims);
+        .def_property_readonly("dims",   &Texture::dims)
+        .def_property_readonly("is_private", &Texture::is_private);
 
     py::class_<Sampler>(m, "Sampler");
 

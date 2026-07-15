@@ -317,6 +317,32 @@ A few things that differ from `Buffer`:
   generates the right MSL type string (`texture2d<float, access::sample>`,
   etc.) if you don't want to hand-write it.
 
+### Moving data in and out of a Texture
+
+`device.texture(data, pixel_format)` and `.upload()`/`.download()` (above)
+are the simple default path -- always available, but CPU-side copies
+(`replaceRegion`/`getBytes`) that only work on the default `Shared` storage
+mode. There's a faster, GPU-side path for every CPU/Buffer/Texture
+direction, each suited to a different data source and each working
+regardless of storage mode (including `private=True`, see below) -- see
+`benchmarks/README.md` for the measurements behind these:
+
+| Direction | Method | Mechanism | Notes |
+|---|---|---|---|
+| CPU -> Texture | `tex.upload(data)` | CPU `replaceRegion` | Simple default; `Shared` storage only |
+| CPU -> Texture | `tex.upload_fast(data)` | CPU->`Buffer` memcpy + GPU blit | Up to ~9x faster at 4K; works on `private=True` |
+| `Buffer` -> Texture | `tex.upload_from_buffer(buf)` | GPU blit | Same mechanism `upload_fast` uses, without the implicit staging `Buffer` -- use this directly if you already have a `Buffer` (e.g. reusing one across a hot loop instead of allocating fresh each call) |
+| Texture -> CPU | `tex.download()` / `.numpy()` / `np.asarray(tex)` | CPU `getBytes` | Simple default; `Shared` storage only |
+| Texture -> CPU | `tex.download_fast()` | GPU compute kernel + `Buffer`->CPU (zero-copy) | ~1.5-1.6x faster at 1080p/4K; works on `private=True`; raises `NotImplementedError` on `Unorm` formats |
+| Texture -> `Buffer` | `tex.to_buffer()` | GPU compute kernel | What `download_fast` calls before `.numpy()` -- use this directly if you want the `Buffer`, not a numpy array (e.g. feeding it straight into another kernel) |
+| Texture -> Texture | `src.copy_to(dst)` | GPU blit | Works on any pixel format (including `Unorm`) and any `Shared`/`Private` combination -- e.g. copying a `Shared` texture you populated with `.upload()` into a `Private` one before a hot compute loop |
+
+`empty_texture(..., readable=, writable=, private=)` controls usage flags
+and storage mode at creation. `private=True` (`MTLStorageModePrivate`,
+GPU-only memory) requires the GPU-side methods above -- `.upload()`/
+`.download()` raise a clear error on a private texture, since Metal itself
+rejects `replaceRegion`/`getBytes` on `Private` storage.
+
 ## Reusing buffers in a hot loop
 
 `Buffer.contents` is a live NumPy view over the same underlying Metal

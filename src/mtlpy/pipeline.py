@@ -6,10 +6,15 @@ class Pipeline:
         self._pipeline = _pipeline  # _mtlpy.Pipeline
 
     def run(self, buffers: list, grid, wait: bool = True,
-            textures: list | None = None, samplers: list | None = None) -> None:
+            textures: list | None = None, samplers: list | None = None) -> tuple[float, float]:
+        """Returns (gpu_start, gpu_end) in seconds -- pure device-side
+        execution time for this dispatch (MTLCommandBuffer's GPUStartTime/
+        GPUEndTime), excluding CPU-side encoding/dispatch overhead. Only
+        meaningful when wait=True; (0.0, 0.0) when wait=False, since the
+        command buffer isn't guaranteed to have even started on the GPU yet."""
         if isinstance(grid, int):
             grid = [grid, 1, 1]
-        self._pipeline.run(
+        return self._pipeline.run(
             [b._buf for b in buffers],
             [t._tex for t in (textures or [])],
             [s._sampler for s in (samplers or [])],

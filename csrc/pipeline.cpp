@@ -57,7 +57,7 @@ MTL::Size Pipeline::compute_threadgroup_size(const std::array<uint32_t, 3>& grid
     return MTL::Size::Make(w, h, d);
 }
 
-void Pipeline::run(
+std::pair<double, double> Pipeline::run(
     const std::vector<Buffer*>&    buffers,
     const std::vector<Texture*>&   textures,
     const std::vector<Sampler*>&   samplers,
@@ -133,7 +133,9 @@ void Pipeline::run(
                 : "Unknown GPU error";
             throw std::runtime_error("GPU execution failed: " + err);
         }
+        return {cmd->GPUStartTime(), cmd->GPUEndTime()};
     }
+    return {0.0, 0.0};
 }
 
 } // namespace mtlpy

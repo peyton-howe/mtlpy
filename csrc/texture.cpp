@@ -26,8 +26,9 @@ MTL::Region region_for(uint32_t dims, uint32_t width, uint32_t height, uint32_t 
 } // namespace
 
 Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
-                  uint32_t width, uint32_t height, uint32_t depth)
-    : dims_(dims)
+                  uint32_t width, uint32_t height, uint32_t depth,
+                  uint32_t usage, bool private_storage)
+    : dims_(dims), is_private_(private_storage)
 {
     // Validate before allocating anything: texture_type_for() throws on an
     // invalid dims, and doing that after MTL::TextureDescriptor::alloc()
@@ -40,8 +41,8 @@ Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
     desc->setWidth(width);
     desc->setHeight(dims >= 2 ? height : 1);
     desc->setDepth(dims >= 3 ? depth : 1);
-    desc->setStorageMode(MTL::StorageModeShared);
-    desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    desc->setStorageMode(private_storage ? MTL::StorageModePrivate : MTL::StorageModeShared);
+    desc->setUsage(usage);
 
     tex_ = device->newTexture(desc);
     desc->release();
@@ -55,11 +56,21 @@ Texture::~Texture() {
 }
 
 void Texture::upload(const void* bytes, size_t bytes_per_row, size_t bytes_per_image) {
+    if (is_private_)
+        throw std::runtime_error(
+            "upload() requires CPU-visible storage (replaceRegion is not valid on a "
+            "Private-storage texture) -- use Device.blit_upload_texture() instead"
+        );
     MTL::Region region = region_for(dims_, width(), height(), depth());
     tex_->replaceRegion(region, /*level=*/0, /*slice=*/0, bytes, bytes_per_row, bytes_per_image);
 }
 
 void Texture::download(void* bytes, size_t bytes_per_row, size_t bytes_per_image) const {
+    if (is_private_)
+        throw std::runtime_error(
+            "download() requires CPU-visible storage (getBytes is not valid on a "
+            "Private-storage texture) -- use Device.buffer_from_texture()/.to_buffer() instead"
+        );
     MTL::Region region = region_for(dims_, width(), height(), depth());
     tex_->getBytes(bytes, bytes_per_row, bytes_per_image, region, /*level=*/0, /*slice=*/0);
 }
