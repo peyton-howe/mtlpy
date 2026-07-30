@@ -39,6 +39,18 @@ class Device:
         # texture shape/format (e.g. repeated per-frame GPU readback).
         self._texture_to_buffer_pipelines: dict = {}
 
+    @property
+    def mtl_ptr(self) -> int:
+        """The id<MTLDevice> handle itself, as a raw integer. Any
+        Buffer/Texture created by this Device belongs to this same MTLDevice
+        -- external native code consuming one of them directly (see
+        Texture.mtl_ptr) needs this to, e.g., set a CAMetalLayer's .device
+        to match, or otherwise confirm it's working with the right physical
+        GPU (Metal forbids mixing resources from different devices in one
+        command encoder). Same raw-pointer, no-automatic-lifetime caveat as
+        Texture.mtl_ptr: valid only as long as this Device is kept alive."""
+        return self._dev.mtl_ptr
+
     def __enter__(self) -> Device:
         return self
 

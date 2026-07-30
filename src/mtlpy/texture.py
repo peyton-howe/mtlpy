@@ -36,6 +36,27 @@ class Texture:
         self._device          = device
 
     @property
+    def mtl_ptr(self) -> int:
+        """The id<MTLTexture> handle itself, as a raw integer -- for handing
+        this Texture to code outside mtlpy (e.g. a hand-written PyObjC/Metal
+        bridge embedding a CAMetalLayer in a Qt/GTK/etc. window) that wants
+        to do its own native interop, without mtlpy needing to know anything
+        about that consumer.
+
+        Unlike Buffer.__dlpack__, there's no automatic lifetime management
+        attached to this pointer -- it's valid only as long as this Texture
+        object is kept alive Python-side (nothing retains the underlying
+        id<MTLTexture> on your behalf). If the consumer needs to outlive
+        this Texture, it must take its own retain (e.g. PyObjC's
+        objc.objc_object(c_void_p=...) bridging does this automatically when
+        it wraps the pointer; raw ctypes access does not).
+
+        The texture also belongs to a specific MTLDevice -- see
+        Device.mtl_ptr -- Metal forbids referencing it from any other
+        device's command encoder."""
+        return self._tex.mtl_ptr
+
+    @property
     def shape(self) -> tuple[int, ...]:
         """Spatial dims (numpy image convention: (H, W) row-major, depth
         first for 3D) plus a trailing channel dim if channels > 1."""

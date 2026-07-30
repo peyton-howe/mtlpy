@@ -1,6 +1,6 @@
 # mtlpy
 
-Python bindings for GPU compute on Apple Metal, built on [pybind11](https://github.com/pybind/pybind11)
+Python bindings for GPU compute on Apple Metal, built on [nanobind](https://github.com/wjakob/nanobind)
 and Apple's [metal-cpp](https://developer.apple.com/metal/cpp/). Write a Metal
 compute kernel as a string, dispatch it over NumPy arrays, get the result back
 as a NumPy array — no separate build step, no manual buffer plumbing.
@@ -23,7 +23,7 @@ project. Rather than build on top of that codebase's ctypes-based bindings
 and global singleton state, mtlpy starts over with a few deliberate
 improvements:
 
-- **pybind11 instead of ctypes** — real type safety across the Python/C++
+- **nanobind instead of ctypes** — real type safety across the Python/C++
   boundary, and Metal errors propagate as Python exceptions instead of
   silent failures.
 - **No global singleton state** — each `Device` owns its own command queue
@@ -44,7 +44,7 @@ current coverage.
 
 ```
 metal-cpp/          Apple's C++ Metal headers (git submodule)
-csrc/                C++ extension (pybind11 + metal-cpp)
+csrc/                C++ extension (nanobind + metal-cpp)
   device.{h,cpp}       MTL::Device + MTL::CommandQueue owner
   buffer.{h,cpp}       MTL::Buffer wrapper (shared-storage, CPU/GPU unified memory)
   texture.{h,cpp}      MTL::Texture wrapper (1D/2D/3D)
@@ -56,7 +56,7 @@ csrc/                C++ extension (pybind11 + metal-cpp)
                           backed by an on-disk MTL::BinaryArchive
   metal_impl.mm        Single Obj-C++ translation unit providing the
                         NS::/CA::/MTL:: private implementations
-  bindings.cpp         pybind11 module definition (`_mtlpy`)
+  bindings.cpp         nanobind module definition (`_mtlpy`)
 src/mtlpy/          Python package (src layout, for PyPI)
   device.py            Device: buffer/empty/texture/sampler/compile, list_devices(), wraps _mtlpy.Device
   buffer.py             Buffer: NumPy-backed contents, arithmetic/comparison/in-place operators
@@ -106,6 +106,12 @@ new data into it via `buf.contents[:] = arr` is still a real memcpy from
   or `reshape()`d with (elementwise ops preserve it); `Buffer.numpy()` /
   `np.asarray(buf)` return contents in that shape. `Buffer.contents` itself
   stays flat regardless — see [Shapes and NumPy interop](#shapes-and-numpy-interop).
+- **Zero-copy interop with other GPU libraries**: every `Buffer` implements
+  the DLPack protocol, tagged Metal-backed rather than CPU — `mx.asarray(buf,
+  copy=False)` (MLX, or any other DLPack-aware library) shares the same
+  `id<MTLBuffer>` with no copy. Raw `mtl_ptr` handles are also available for
+  non-DLPack native interop — see [Zero-copy interop with other GPU
+  libraries](#zero-copy-interop-with-other-gpu-libraries).
 - **Dtype support**: `float32`, `float16`, `int32`, `uint32`,
   `int16`, `uint16`, `int64`, `uint64`, `bool` — mapped to their Metal
   equivalents (`float`, `half`, `int`, `uint`, `short`, `ushort`,
@@ -238,6 +244,43 @@ buffers with equal flat size but different declared `.shape` are still valid
 operands; the result takes the first operand's `.shape`. `.shape` is
 purely Python-side bookkeeping layered on top, not something Metal itself
 knows about.
+
+## Zero-copy interop with other GPU libraries
+
+Every `Buffer` implements the [DLPack](https://github.com/dmlc/dlpack)
+protocol (`__dlpack__`/`__dlpack_device__`), tagged as Metal-backed
+(`kDLMetal`) rather than plain CPU memory. Any DLPack-aware library gets a
+genuine zero-copy view over the same `id<MTLBuffer>` — no allocation, no
+`memcpy` — just by taking the `Buffer` directly:
+
+```python
+import mlx.core as mx
+
+buf = device.buffer(np.arange(8, dtype=np.float32))
+arr = mx.asarray(buf, copy=False)  # shares this Buffer's live memory
+
+buf.contents[0] = 111.0
+arr[0].item()  # 111.0 -- same underlying allocation, not a copy
+```
+
+Measured at 4K/8K image sizes: ~15-25µs regardless of resolution (just
+wrapping the existing handle), versus hundreds of µs to a few ms for the
+`.contents()`-view-then-copy alternative most non-DLPack-aware code falls
+back to — that path scales linearly with buffer size since it's a real
+`memcpy`, while the DLPack path doesn't move any bytes at all.
+
+mtlpy itself never imports MLX (or any other consumer) anywhere — the
+dunder protocol methods are the complete surface; this is standard DLPack,
+not an MLX-specific integration, so any other DLPack-aware library works the
+same way.
+
+For interop with something that *isn't* DLPack-aware (e.g. hand-written
+PyObjC/Metal bridging code), `Device.mtl_ptr` / `Buffer.mtl_ptr` /
+`Texture.mtl_ptr` expose the raw `id<MTLDevice>`/`id<MTLBuffer>`/
+`id<MTLTexture>` handle as a plain integer. Unlike the DLPack path (which
+retains the underlying Metal object for as long as the consumer holds it),
+these are bare pointers with no lifetime management — valid only as long as
+you keep the owning mtlpy object referenced yourself.
 
 ## Textures
 
