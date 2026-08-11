@@ -4,6 +4,7 @@ from .buffer import Buffer
 from .pipeline import CommandBuffer, Pipeline
 from .texture import Sampler, Texture
 from . import utils, shader
+from .utils import StorageMode
 
 try:
     from . import _mtlpy
@@ -64,22 +65,31 @@ class Device:
         a crash, or just deterministic cleanup via `with mtlpy.Device() as d:`."""
         self._dev.flush_cache()
 
-    def buffer(self, data: np.ndarray | int, dtype=None) -> Buffer:
+    def buffer(self, data: np.ndarray | int, dtype=None,
+               storage: StorageMode = StorageMode.SHARED) -> Buffer:
+        """storage -- see mtlpy.StorageMode. When data is an ndarray and
+        storage isn't SHARED, the array is first staged into a Shared buffer
+        (the only storage mode a plain CPU memcpy can write into) and then
+        GPU-blit-copied into a fresh buffer of the requested storage (see
+        Buffer.to_storage())."""
+        storage = StorageMode(storage)
         if isinstance(data, np.ndarray):
             arr = np.ascontiguousarray(data)
-            buf = self.empty(arr.shape, arr.dtype)
+            buf = self.empty(arr.shape, arr.dtype)  # always Shared -- see docstring above
             buf.contents[:] = arr.reshape(-1)  # buf.contents is always flat
-            return buf
+            return buf.to_storage(storage)
         size = int(data)
         dt   = utils.to_numpy(dtype)
-        raw  = self._dev.create_buffer(size * np.dtype(dt).itemsize)
+        raw  = self._dev.create_buffer(size * np.dtype(dt).itemsize, int(storage))
         return Buffer(raw, dt, (size,), self)
 
-    def empty(self, size: int | tuple[int, ...], dtype) -> Buffer:
+    def empty(self, size: int | tuple[int, ...], dtype,
+              storage: StorageMode = StorageMode.SHARED) -> Buffer:
+        """storage -- see mtlpy.StorageMode."""
         shape = (int(size),) if isinstance(size, (int, np.integer)) else tuple(int(s) for s in size)
         flat_size = utils.shape_size(shape)
         dt  = utils.to_numpy(dtype)
-        raw = self._dev.create_buffer(flat_size * np.dtype(dt).itemsize)
+        raw = self._dev.create_buffer(flat_size * np.dtype(dt).itemsize, int(StorageMode(storage)))
         return Buffer(raw, dt, shape, self)
 
     def compile(self, source: str, function_name: str) -> Pipeline:

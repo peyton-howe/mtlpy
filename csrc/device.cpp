@@ -82,8 +82,8 @@ Device::~Device() {
     device_->release();
 }
 
-Buffer* Device::create_buffer(size_t size_bytes) {
-    return new Buffer(device_, size_bytes);
+Buffer* Device::create_buffer(size_t size_bytes, uint32_t storage_mode) {
+    return new Buffer(device_, size_bytes, storage_mode);
 }
 
 Pipeline* Device::compile(const std::string& source, const std::string& function_name) {
@@ -122,6 +122,13 @@ void Device::copy_texture(Texture* src, Texture* dst, bool wait) {
     run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
         blit->copyFromTexture(src->mtl(), dst->mtl());
     }, "GPU texture-to-texture copy");
+}
+
+void Device::copy_buffer(Buffer* src, size_t src_offset, Buffer* dst, size_t dst_offset,
+                          size_t size_bytes, bool wait) {
+    run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
+        blit->copyFromBuffer(src->mtl(), src_offset, dst->mtl(), dst_offset, size_bytes);
+    }, "GPU buffer-to-buffer copy");
 }
 
 Sampler* Device::create_sampler(bool linear, bool repeat) {

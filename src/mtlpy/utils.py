@@ -1,5 +1,33 @@
+import enum
 from typing import NamedTuple
 import numpy as np
+
+
+class StorageMode(enum.IntEnum):
+    """Metal buffer storage mode -- raw MTL::StorageMode values (metal-cpp's
+    Metal/MTLResource.hpp), passed straight through to Device.create_buffer()
+    with no translation needed.
+
+    SHARED (the default): CPU and GPU see the same memory directly --
+    Buffer.contents/.numpy()/.__dlpack__() all work with no extra copy.
+
+    MANAGED: CPU and GPU each keep their own copy, synchronized by Metal --
+    only meaningful on Intel Macs with a discrete GPU (Apple silicon's
+    unified memory makes this behave like SHARED). Treated the same as
+    PRIVATE by every CPU-reading path below, since reading a Managed
+    buffer's CPU-side copy directly isn't safe without an explicit
+    synchronize the GPU may not have triggered yet.
+
+    PRIVATE: GPU-only memory, invisible to the CPU -- lets Metal use its
+    most aggressive internal layout. Buffer.contents/.numpy()/.__dlpack__()
+    need a Shared copy first; see Buffer.to_storage().
+
+    MTLStorageModeMemoryless isn't offered here: Metal restricts it to
+    render-target textures, not buffers.
+    """
+    SHARED  = 0
+    MANAGED = 1
+    PRIVATE = 2
 
 
 def shape_size(shape: tuple[int, ...]) -> int:

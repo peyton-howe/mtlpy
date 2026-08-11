@@ -2,6 +2,7 @@ from __future__ import annotations
 import ctypes
 import numpy as np
 from . import shader, utils
+from .utils import StorageMode
 
 
 class _BackedArray(np.ndarray):
@@ -17,26 +18,52 @@ class Buffer:
         self.dtype   = np.dtype(dtype)
         self.shape   = tuple(shape)
         self._device = device           # Python Device (needed for ops)
+        self.storage = StorageMode(_buf.storage_mode)
         # Computed once here, not as a property recomputed on every access:
         # .shape is never mutated after construction (reshape() below always
         # returns a new Buffer instead), so there's no desync risk from
         # caching it
         self.size    = utils.shape_size(self.shape)  # element count
 
+    def to_storage(self, storage: StorageMode) -> Buffer:
+        """A new Buffer holding a copy of this Buffer's data in a different
+        storage mode, via a GPU-side blit copy (Device.copy_buffer()) --
+        unlike a CPU memcpy, this works no matter which storage mode(s) are
+        involved (including Private, which has no CPU-visible memory at
+        all). Returns self unchanged (no copy) if already in storage."""
+        storage = StorageMode(storage)
+        if storage == self.storage:
+            return self
+        nbytes = self.size * self.dtype.itemsize
+        raw    = self._device._dev.create_buffer(nbytes, int(storage))
+        self._device._dev.copy_buffer(self._buf, 0, raw, 0, nbytes, True)
+        return Buffer(raw, self.dtype, self.shape, self._device)
+
     @property
     def contents(self) -> np.ndarray:
-        nbytes     = self.size * self.dtype.itemsize
-        ctypes_arr = (ctypes.c_byte * nbytes).from_address(self._buf.data_ptr)
-        arr        = np.ctypeslib.as_array(ctypes_arr).view(self.dtype).view(_BackedArray)
-        arr._mtlpy_buf = self           # keep Buffer alive while array is alive
+        """CPU-visible flat view over this Buffer's data. For a Shared
+        Buffer, this is a live, zero-copy view over the actual GPU memory --
+        writes here are writes to what the GPU sees, no separate flush
+        needed. A Private/Managed Buffer has no CPU memory that's safe to
+        read directly (see StorageMode's docstring), so this transparently
+        materializes a Shared copy first via to_storage() -- safe to call
+        either way, but for those two storage modes the result is a
+        snapshot: neither further GPU writes to this Buffer nor writes to
+        the returned array affect the other."""
+        buf        = self.to_storage(StorageMode.SHARED)
+        nbytes     = buf.size * buf.dtype.itemsize
+        ctypes_arr = (ctypes.c_byte * nbytes).from_address(buf._buf.data_ptr)
+        arr        = np.ctypeslib.as_array(ctypes_arr).view(buf.dtype).view(_BackedArray)
+        arr._mtlpy_buf = buf            # keep the (possibly materialized) Buffer alive
         return arr
 
     def numpy(self) -> np.ndarray:
         """Contents reshaped to this Buffer's .shape -- unlike .contents
         (always flat, see the property above), this looks like the array
-        you created the Buffer from. Zero-copy: reshaping a flat contiguous
-        array is always a view, never a copy, so this is just as live as
-        .contents and keeps this Buffer alive via the same backref."""
+        you created the Buffer from. Zero-copy for a Shared Buffer
+        (reshaping a flat contiguous array is always a view, never a copy,
+        so this is just as live as .contents); for Private/Managed this
+        carries .contents' snapshot-copy caveat instead."""
         return self.contents.reshape(self.shape)
 
     @property
@@ -58,9 +85,11 @@ class Buffer:
         """Zero-copy DLPack export, backed directly by this Buffer's
         underlying id<MTLBuffer> (tagged kDLMetal) -- verified against MLX:
         mx.asarray(buf, copy=False) shares this Buffer's live memory rather
-        than copying it. Every Buffer is MTL::ResourceStorageModeShared
-        (see csrc/buffer.cpp), so this always succeeds; there's no
-        private-storage case to reject.
+        than copying it. Only works for a Shared-storage Buffer (raises
+        otherwise -- see StorageMode's docstring): Private storage has no
+        CPU-visible memory to hand a DLPack consumer zero-copy, and Managed
+        needs an explicit synchronize a generic DLPack consumer won't do.
+        Call .to_storage(StorageMode.SHARED) first to get an exportable copy.
 
         stream is accepted but unused: every op that writes into a Buffer
         (Pipeline.run, elementwise ops, ...) defaults to wait=True and is
@@ -69,6 +98,12 @@ class Buffer:
         responsible for waiting before handing the Buffer to another
         framework via DLPack, same as for any other read of .contents.
         """
+        if self.storage != StorageMode.SHARED:
+            raise BufferError(
+                f"Buffer.__dlpack__ requires Shared storage for zero-copy export "
+                f"(this Buffer is {self.storage.name}) -- call "
+                f".to_storage(mtlpy.StorageMode.SHARED) first to get an exportable copy."
+            )
         if copy:
             raise BufferError("Buffer.__dlpack__ does not support copy=True (already zero-copy)")
         if dl_device is not None and dl_device != _DLPACK_DEVICE:
@@ -213,4 +248,5 @@ class Buffer:
         return self.size
 
     def __repr__(self) -> str:
-        return f"Buffer(shape={self.shape}, dtype={self.dtype})"
+        storage = "" if self.storage == StorageMode.SHARED else f", storage={self.storage.name.lower()}"
+        return f"Buffer(shape={self.shape}, dtype={self.dtype}{storage})"

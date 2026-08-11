@@ -21,7 +21,8 @@ public:
     explicit Device(int index = -1);
     ~Device();
 
-    Buffer*   create_buffer(size_t size_bytes);
+    // storage_mode -- see Buffer's constructor in buffer.h.
+    Buffer*   create_buffer(size_t size_bytes, uint32_t storage_mode);
     Pipeline* compile(const std::string& source, const std::string& function_name);
 
     // dims is 1/2/3 (see Texture); pixel_format is a raw MTL::PixelFormat
@@ -57,6 +58,15 @@ public:
     // (including Unorm, unlike Texture::to_buffer()) and any combination of
     // Shared/Private storage on either side.
     void copy_texture(Texture* src, Texture* dst, bool wait);
+
+    // Hardware-blit buffer-to-buffer copy (MTLBlitCommandEncoder::
+    // copyFromBuffer) -- the Buffer counterpart to copy_texture(), and the
+    // mechanism Buffer.to_storage() (src/mtlpy/buffer.py) uses to
+    // materialize a CPU-readable Shared copy of a Private/Managed Buffer.
+    // Works for any combination of storage modes on either side, same as
+    // copy_texture().
+    void copy_buffer(Buffer* src, size_t src_offset, Buffer* dst, size_t dst_offset,
+                      size_t size_bytes, bool wait);
 
     Sampler* create_sampler(bool linear, bool repeat);
 
