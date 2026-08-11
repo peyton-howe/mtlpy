@@ -88,6 +88,7 @@ PYBIND11_MODULE(_mtlpy, m) {
         .def("run", &Pipeline::run,
              py::arg("buffers"), py::arg("textures"), py::arg("samplers"),
              py::arg("grid"), py::arg("wait") = true,
+             py::arg("threadgroup") = std::nullopt,
              // Pipeline::run touches only raw C++/Metal state after argument
              // conversion (no PyObject* access), so it's safe to release the
              // GIL for the whole call -- otherwise a wait=True dispatch fully

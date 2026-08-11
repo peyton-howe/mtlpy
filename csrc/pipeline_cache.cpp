@@ -1,4 +1,5 @@
 #include "pipeline_cache.h"
+#include "pool_guard.h"
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
@@ -41,6 +42,8 @@ PipelineCache::PipelineCache(MTL::Device* device)
     if (archive_path_.empty())
         return;
 
+    PoolGuard guard;
+
     auto* descriptor = MTL::BinaryArchiveDescriptor::alloc()->init();
     if (fs::exists(archive_path_))
         descriptor->setUrl(url_for(archive_path_));
@@ -54,6 +57,8 @@ PipelineCache::PipelineCache(MTL::Device* device)
 }
 
 PipelineCache::~PipelineCache() {
+    PoolGuard guard;
+
     for (auto& [key, cached] : cache_)
         cached.state->release();
 
@@ -68,6 +73,7 @@ void PipelineCache::flush() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!archive_)
         return;
+    PoolGuard guard;
     NS::Error* error = nullptr;
     archive_->serializeToURL(url_for(archive_path_), &error);
     // Best-effort, same as the destructor's serialize call -- a failed
@@ -88,6 +94,8 @@ CachedPipeline PipelineCache::get_or_create(
     auto it = cache_.find(key);
     if (it != cache_.end())
         return it->second;
+
+    PoolGuard guard;
 
     NS::Error* error = nullptr;
     auto* src = NS::String::string(source.c_str(), NS::UTF8StringEncoding);
