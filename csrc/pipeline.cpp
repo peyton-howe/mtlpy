@@ -10,6 +10,23 @@
 
 namespace mtlpy {
 
+namespace {
+// RAII guard for the self-contained dispatch path's encoder in
+// Pipeline::run(): without this, any *future* exception thrown between
+// computeCommandEncoder() and endEncoding() would release an unterminated
+// MTLComputeCommandEncoder -- fatal (Metal's API validation layer calls
+// abort(), not a catchable exception), the same failure mode the
+// threadgroup-validation reordering above guards against, but structurally
+// rather than by convention. Mirrors CommandBuffer's destructor, which
+// gives the batched dispatch path this same guarantee.
+struct EncoderEndGuard {
+    MTL::ComputeCommandEncoder* encoder;
+    bool ended = false;
+    void end() { encoder->endEncoding(); ended = true; }
+    ~EncoderEndGuard() { if (!ended) encoder->endEncoding(); }
+};
+} // namespace
+
 Pipeline::Pipeline(MTL::ComputePipelineState* state, MTL::CommandQueue* queue,
                     uint32_t required_buffer_count, uint32_t required_texture_count,
                     uint32_t required_sampler_count)
@@ -184,10 +201,11 @@ std::pair<double, double> Pipeline::run(
         auto* encoder = cmd->computeCommandEncoder();
         if (!encoder)
             throw std::runtime_error("Failed to create compute encoder");
+        EncoderEndGuard encoder_guard{encoder};
 
         encoder->setComputePipelineState(state_);
         bind_resources_and_dispatch(encoder);
-        encoder->endEncoding();
+        encoder_guard.end();
 
         cmd->commit();
 
@@ -208,7 +226,6 @@ std::pair<double, double> Pipeline::run(
             external_cb->mark_failed();
         throw;
     }
-    return {0.0, 0.0};
 }
 
 } // namespace mtlpy

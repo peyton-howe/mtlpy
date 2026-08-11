@@ -60,6 +60,7 @@ Texture::~Texture() {
 }
 
 void Texture::upload(const void* bytes, size_t bytes_per_row, size_t bytes_per_image) {
+    PoolGuard guard;
     if (is_private_)
         throw std::runtime_error(
             "upload() requires CPU-visible storage (replaceRegion is not valid on a "
@@ -70,6 +71,7 @@ void Texture::upload(const void* bytes, size_t bytes_per_row, size_t bytes_per_i
 }
 
 void Texture::download(void* bytes, size_t bytes_per_row, size_t bytes_per_image) const {
+    PoolGuard guard;
     if (is_private_)
         throw std::runtime_error(
             "download() requires CPU-visible storage (getBytes is not valid on a "

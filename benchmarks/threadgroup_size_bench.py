@@ -85,20 +85,30 @@ def gpu_median_ms(pipeline, buffers, grid, threadgroup, repeat: int) -> float:
     return statistics.median(samples)
 
 
-def bench_size(device: Device, naive_pipeline, height: int, width: int,
-                shapes: list[tuple[int, int]], repeat: int) -> list[dict]:
-    rng = np.random.default_rng(0)
+def make_source_and_reference(device: Device, naive_pipeline, height: int, width: int, seed: int):
+    """Random source image plus its untiled-reference blur output -- shared
+    setup for bench_size() and demonstrate_mismatch_is_wrong(), which both
+    need a source buffer and a known-correct reference to diff against."""
+    rng = np.random.default_rng(seed)
     src_np = rng.random((height, width)).astype(np.float32)
 
     buf_in = device.buffer(src_np.reshape(-1))
     buf_out_naive = device.empty(height * width, np.float32)
-    buf_out_tiled = device.empty(height * width, np.float32)
     width_buf = device.buffer(np.array([width], dtype=np.uint32))
     height_buf = device.buffer(np.array([height], dtype=np.uint32))
     grid = [width, height, 1]
 
     naive_pipeline.run([buf_in, buf_out_naive, width_buf, height_buf], grid, wait=True)
     reference = buf_out_naive.contents.reshape(height, width).copy()
+
+    return buf_in, width_buf, height_buf, grid, reference
+
+
+def bench_size(device: Device, naive_pipeline, height: int, width: int,
+                shapes: list[tuple[int, int]], repeat: int) -> list[dict]:
+    buf_in, width_buf, height_buf, grid, reference = make_source_and_reference(
+        device, naive_pipeline, height, width, seed=0)
+    buf_out_tiled = device.empty(height * width, np.float32)
 
     results = []
     for tile_x, tile_y in shapes:
@@ -130,18 +140,9 @@ def demonstrate_mismatch_is_wrong(device: Device, naive_pipeline) -> None:
     threadgroup= matches the compiled TILE_X/TILE_Y, and this shows what
     happens when it doesn't."""
     height, width = 257, 257
-    rng = np.random.default_rng(1)
-    src_np = rng.random((height, width)).astype(np.float32)
-
-    buf_in = device.buffer(src_np.reshape(-1))
-    buf_out_naive = device.empty(height * width, np.float32)
+    buf_in, width_buf, height_buf, grid, reference = make_source_and_reference(
+        device, naive_pipeline, height, width, seed=1)
     buf_out_tiled = device.empty(height * width, np.float32)
-    width_buf = device.buffer(np.array([width], dtype=np.uint32))
-    height_buf = device.buffer(np.array([height], dtype=np.uint32))
-    grid = [width, height, 1]
-
-    naive_pipeline.run([buf_in, buf_out_naive, width_buf, height_buf], grid, wait=True)
-    reference = buf_out_naive.contents.reshape(height, width).copy()
 
     pipeline = device.compile(make_tiled_source(32, 32), "gaussian_buffer_tiled")
 

@@ -6,6 +6,15 @@ from __future__ import annotations
 _WAIT_UNSET = object()
 
 
+def _pad_dims(spec) -> list[int]:
+    """Expands an int or a 1-to-3-element size sequence to a 3-element list,
+    padding missing trailing dims with 1 -- shared convention for both grid
+    and threadgroup in Pipeline.run."""
+    if isinstance(spec, int):
+        spec = [spec]
+    return list(spec) + [1] * (3 - len(spec))
+
+
 class Pipeline:
     def __init__(self, _pipeline):
         self._pipeline = _pipeline  # _mtlpy.Pipeline
@@ -48,18 +57,13 @@ class Pipeline:
                 "batched together has been encoded, not per-dispatch"
             )
         wait = True if wait is _WAIT_UNSET else wait
-        if isinstance(grid, int):
-            grid = [grid, 1, 1]
-        tg = None
-        if threadgroup is not None:
-            if isinstance(threadgroup, int):
-                threadgroup = [threadgroup]
-            tg = list(threadgroup) + [1] * (3 - len(threadgroup))
+        grid = _pad_dims(grid)
+        tg = _pad_dims(threadgroup) if threadgroup is not None else None
         return self._pipeline.run(
             [b._buf for b in buffers],
             [t._tex for t in (textures or [])],
             [s._sampler for s in (samplers or [])],
-            list(grid),
+            grid,
             wait,
             cb._cb if cb is not None else None,
             tg,

@@ -20,6 +20,8 @@ namespace {
 void run_blit(MTL::CommandQueue* queue, bool wait,
               const std::function<void(MTL::BlitCommandEncoder*)>& encode,
               const char* error_context) {
+    PoolGuard guard;
+
     auto* cmd = queue->commandBuffer();
     if (!cmd)
         throw std::runtime_error("Failed to create Metal command buffer");

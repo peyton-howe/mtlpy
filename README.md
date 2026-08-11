@@ -49,8 +49,6 @@ csrc/                C++ extension (nanobind + metal-cpp)
   buffer.{h,cpp}       MTL::Buffer wrapper (shared-storage, CPU/GPU unified memory)
   texture.{h,cpp}      MTL::Texture wrapper (1D/2D/3D)
   sampler.{h,cpp}      MTL::SamplerState wrapper
-  texture.{h,cpp}      MTL::Texture wrapper (1D/2D/3D)
-  sampler.{h,cpp}      MTL::SamplerState wrapper
   pipeline.{h,cpp}     Dispatches a compiled MTL::ComputePipelineState
   command_buffer.{h,cpp}  Batches multiple Pipeline::run() dispatches into
                           one MTL::CommandBuffer submission
