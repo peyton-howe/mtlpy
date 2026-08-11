@@ -1,5 +1,4 @@
 #include "texture.h"
-#include "pool_guard.h"
 #include <stdexcept>
 
 namespace mtlpy {
@@ -31,8 +30,6 @@ Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
                   uint32_t usage, bool private_storage)
     : dims_(dims), is_private_(private_storage)
 {
-    PoolGuard guard;
-
     // Validate before allocating anything: texture_type_for() throws on an
     // invalid dims, and doing that after MTL::TextureDescriptor::alloc()
     // would leak the descriptor on the way out.
@@ -55,7 +52,6 @@ Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
 }
 
 Texture::~Texture() {
-    PoolGuard guard;
     tex_->release();
 }
 

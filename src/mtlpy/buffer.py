@@ -8,6 +8,9 @@ class _BackedArray(np.ndarray):
     """ndarray subclass with a __dict__, so it can hold a _mtlpy_buf backref."""
 
 
+_DLPACK_DEVICE = (8, 0)  # (DLDeviceType.kDLMetal, device 0) -- see csrc/dlpack.h
+
+
 class Buffer:
     def __init__(self, _buf, dtype: np.dtype, shape: tuple[int, ...], device):
         self._buf    = _buf             # _mtlpy.Buffer
@@ -35,6 +38,43 @@ class Buffer:
         array is always a view, never a copy, so this is just as live as
         .contents and keeps this Buffer alive via the same backref."""
         return self.contents.reshape(self.shape)
+
+    @property
+    def mtl_ptr(self) -> int:
+        """The id<MTLBuffer> handle itself, as a raw integer -- for handing
+        this Buffer to code outside mtlpy that wants to do its own native
+        Metal interop (see Texture.mtl_ptr's docstring for the general
+        pattern and lifetime caveat this shares). For any DLPack-aware
+        consumer (MLX, PyTorch, ...), just hand it this Buffer directly --
+        e.g. mx.asarray(buf, copy=False) calls __dlpack__ automatically, and
+        that path comes with automatic cross-library lifetime management
+        (see _dlpack_capsule in bindings.cpp); this raw pointer does not."""
+        return self._buf.mtl_ptr
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        return _DLPACK_DEVICE
+
+    def __dlpack__(self, *, stream=None, max_version=None, dl_device=None, copy=None):
+        """Zero-copy DLPack export, backed directly by this Buffer's
+        underlying id<MTLBuffer> (tagged kDLMetal) -- verified against MLX:
+        mx.asarray(buf, copy=False) shares this Buffer's live memory rather
+        than copying it. Every Buffer is MTL::ResourceStorageModeShared
+        (see csrc/buffer.cpp), so this always succeeds; there's no
+        private-storage case to reject.
+
+        stream is accepted but unused: every op that writes into a Buffer
+        (Pipeline.run, elementwise ops, ...) defaults to wait=True and is
+        already synchronized by the time it returns. A caller who used
+        wait=False or CommandBuffer batching to leave GPU work in flight is
+        responsible for waiting before handing the Buffer to another
+        framework via DLPack, same as for any other read of .contents.
+        """
+        if copy:
+            raise BufferError("Buffer.__dlpack__ does not support copy=True (already zero-copy)")
+        if dl_device is not None and dl_device != _DLPACK_DEVICE:
+            raise BufferError(f"Cannot export mtlpy Buffer to DLPack device {dl_device}")
+        code, bits = utils.to_dlpack_dtype(self.dtype)
+        return self._buf._dlpack_capsule(code, bits, list(self.shape))
 
     def __array__(self, dtype=None, copy=None) -> np.ndarray:
         """Lets np.array(buf) / np.asarray(buf) work directly on a Buffer."""

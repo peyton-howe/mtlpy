@@ -112,3 +112,31 @@ def msl_storage_type(dtype) -> str:
         return _STORAGE_TYPE[dt]
     except KeyError:
         raise TypeError(f"No MSL storage type for dtype: {dt}")
+
+
+# (numpy dtype, DLPack DLDataTypeCode, bits) -- codes from dlpack.h (see
+# csrc/dlpack.h): 0=kDLInt, 1=kDLUInt, 2=kDLFloat, 6=kDLBool. Covers every
+# dtype _TABLE above supports -- NOT necessarily every dtype a Buffer can
+# hold, since Device.buffer()/empty() pass any numpy dtype through to_numpy()
+# unvalidated (only float64 is special-cased). to_dlpack_dtype below raises a
+# clear TypeError for anything outside this table rather than assuming it's
+# unreachable.
+_DLPACK_CODE = {
+    np.dtype(np.float32): (2, 32),
+    np.dtype(np.float16): (2, 16),
+    np.dtype(np.int32):   (0, 32),
+    np.dtype(np.uint32):  (1, 32),
+    np.dtype(np.int16):   (0, 16),
+    np.dtype(np.uint16):  (1, 16),
+    np.dtype(np.int64):   (0, 64),
+    np.dtype(np.uint64):  (1, 64),
+    np.dtype(np.bool_):   (6, 8),
+}
+
+
+def to_dlpack_dtype(dtype) -> tuple[int, int]:
+    dt = np.dtype(dtype)
+    try:
+        return _DLPACK_CODE[dt]
+    except KeyError:
+        raise TypeError(f"No DLPack equivalent for dtype: {dt}")

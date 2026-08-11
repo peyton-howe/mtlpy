@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from .buffer import Buffer
-from .pipeline import Pipeline
+from .pipeline import CommandBuffer, Pipeline
 from .texture import Sampler, Texture
 from . import utils, shader
 
@@ -38,6 +38,18 @@ class Device:
         # lookup on every to_buffer()/download_fast() call for the same
         # texture shape/format (e.g. repeated per-frame GPU readback).
         self._texture_to_buffer_pipelines: dict = {}
+
+    @property
+    def mtl_ptr(self) -> int:
+        """The id<MTLDevice> handle itself, as a raw integer. Any
+        Buffer/Texture created by this Device belongs to this same MTLDevice
+        -- external native code consuming one of them directly (see
+        Texture.mtl_ptr) needs this to, e.g., set a CAMetalLayer's .device
+        to match, or otherwise confirm it's working with the right physical
+        GPU (Metal forbids mixing resources from different devices in one
+        command encoder). Same raw-pointer, no-automatic-lifetime caveat as
+        Texture.mtl_ptr: valid only as long as this Device is kept alive."""
+        return self._dev.mtl_ptr
 
     def __enter__(self) -> Device:
         return self
@@ -183,6 +195,16 @@ class Device:
         out-of-bounds texture coordinates instead of clamping to the edge."""
         raw = self._dev.create_sampler(linear, repeat)
         return Sampler(raw, linear, repeat, self)
+
+    def command_buffer(self) -> CommandBuffer:
+        """A batch of Pipeline.run() dispatches that share one MTLCommandBuffer
+        submission -- see CommandBuffer's docstring for the context-manager
+        usage. Use this instead of separate Pipeline.run() calls when you
+        have multiple dispatches that always run together (e.g. a multi-pass
+        kernel), to pay one command-buffer-submit + wait instead of one per
+        dispatch."""
+        raw = self._dev.create_command_buffer()
+        return CommandBuffer(raw)
 
     def _binary_op(self, name: str, shader_fn, a: Buffer, b: Buffer, out: Buffer | None = None) -> Buffer:
         if a._device is not b._device:

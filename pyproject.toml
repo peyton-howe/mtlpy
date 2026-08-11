@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+requires = ["scikit-build-core>=0.9", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "mtlpy"
-version = "0.1.0"
+version = "0.3.0"
 description = "Python bindings for Apple Metal GPU compute"
 readme = "README.md"
 license = "MIT"

@@ -11,6 +11,7 @@ class Pipeline;
 class PipelineCache;
 class Texture;
 class Sampler;
+class CommandBuffer;
 
 class Device {
 public:
@@ -59,10 +60,24 @@ public:
 
     Sampler* create_sampler(bool linear, bool repeat);
 
+    // Lets multiple Pipeline::run() dispatches batch into one command-
+    // buffer submission -- see CommandBuffer's own doc comment.
+    CommandBuffer* create_command_buffer();
+
     uint32_t max_threads_per_threadgroup() const;
     void     flush_cache();
 
     static std::vector<std::string> available_device_names();
+
+    // The id<MTLDevice> handle itself (see Buffer::mtl()/Texture::mtl() for
+    // the same convention) -- exposed so external code (another native
+    // library, a hand-written PyObjC/Metal bridge, ...) can confirm a
+    // Buffer/Texture it was handed belongs to *this* device before doing
+    // anything with it. Metal forbids referencing a resource from a
+    // different MTLDevice in the same command encoder -- there's no
+    // cross-device fallback, so this is a hard precondition, not an
+    // optimization.
+    MTL::Device* mtl() const { return device_; }
 
 private:
     MTL::Device*       device_;

@@ -16,6 +16,17 @@ Each run measures, per (operator, buffer size):
 
 Results are saved as JSON (git commit + timestamp) to --out-dir so a later
 run can be diffed against them with --baseline.
+
+Note: warm-dispatch timing needs enough warmup iterations for the GPU to
+reach a stable clock/power state -- a handful of dispatches isn't always
+enough (see benchmarks/demosaic_bench.py's adaptive warmup for a kernel
+where this mattered a lot). If you see run-to-run drift here, increase
+`warmup` in bench_one.
+
+Also runs a small, separate benchmark (skip with --no-command-buffer)
+comparing Device.command_buffer() batching against a naive wait=True-each
+dispatch chain and a wait=False chain, for two dependent dispatches -- see
+the README's "Batching dispatches" section for what each approach is for.
 """
 from __future__ import annotations
 
@@ -30,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mtlpy import Device, operators
+from mtlpy import Device, operators, shader
 
 DEFAULT_SIZES = [1024, 16_384, 262_144, 4_194_304]
 DEFAULT_OPS = ["add", "sub", "mul", "sqrt", "cos", "sin", "tan", "exp", "log"]
@@ -74,6 +85,29 @@ def make_inputs(size: int, op: str) -> tuple[np.ndarray, np.ndarray]:
     return a, b
 
 
+def warmup_until_stable(
+    dispatch, max_iters: int = 100, window: int = 8, tol: float = 0.08, min_iters: int = 8
+) -> list[float]:
+    """Dispatch repeatedly until a trailing window of sample times is within
+    `tol` fraction of its own median (GPU clocks have visibly settled), or
+    `max_iters` is hit. Returns all warmup sample times (seconds), for
+    diagnostics. Same technique as benchmarks/demosaic_bench.py's helper of
+    the same name -- duplicated rather than imported, since each benchmark
+    script here is meant to be standalone; see this file's module docstring
+    for why a fixed handful of warmup iterations isn't always enough."""
+    times = []
+    for i in range(max_iters):
+        t0 = time.perf_counter()
+        dispatch()
+        times.append(time.perf_counter() - t0)
+        if i + 1 >= min_iters and i + 1 >= window:
+            recent = times[-window:]
+            spread = (max(recent) - min(recent)) / statistics.median(recent)
+            if spread < tol:
+                break
+    return times
+
+
 def bench_one(device: Device, op: str, size: int, repeat: int, warmup: int = 3) -> dict:
     a_np, b_np = make_inputs(size, op)
     a = device.buffer(a_np)
@@ -112,6 +146,63 @@ def bench_one(device: Device, op: str, size: int, repeat: int, warmup: int = 3) 
         "numpy_ms": numpy_s * 1e3,
         "gpu_vs_numpy_speedup": numpy_s / warm_s,
     }
+
+
+def bench_command_buffer_batching(device: Device, size: int, repeat: int) -> dict:
+    """Compares three ways to run two dependent dispatches (dispatch 2 reads
+    dispatch 1's output) -- naive (wait=True on each), a wait=False chain
+    (relies on Metal's FIFO commit ordering to sync once, at the end), and
+    Device.command_buffer() batching (one submission for both). See the
+    README's "Batching dispatches" section for when each is the better
+    choice -- this is the timing behind that writeup's numbers, not a fixed
+    "X is always faster" result."""
+    add_pipeline = device.compile(shader.add_kernel("float"), "add")
+    a = device.buffer(np.ones(size, dtype=np.float32))
+    ones = device.buffer(np.ones(size, dtype=np.float32))
+    mid = device.empty(size, np.float32)
+    out = device.empty(size, np.float32)
+
+    def naive():
+        add_pipeline.run([a, ones, mid], size, wait=True)
+        add_pipeline.run([mid, ones, out], size, wait=True)
+
+    def wait_false_chain():
+        add_pipeline.run([a, ones, mid], size, wait=False)
+        add_pipeline.run([mid, ones, out], size, wait=True)
+
+    def batched():
+        with device.command_buffer() as cb:
+            add_pipeline.run([a, ones, mid], size, cb=cb)
+            add_pipeline.run([mid, ones, out], size, cb=cb)
+
+    def median_ms(fn) -> float:
+        warmup_until_stable(fn)
+        samples = []
+        for _ in range(repeat):
+            t0 = time.perf_counter()
+            fn()
+            samples.append(time.perf_counter() - t0)
+        return statistics.median(samples) * 1e3
+
+    return {
+        "size": size,
+        "naive_ms": median_ms(naive),
+        "wait_false_chain_ms": median_ms(wait_false_chain),
+        "batched_ms": median_ms(batched),
+    }
+
+
+def print_command_buffer_table(results: list[dict]) -> None:
+    print("\nCommandBuffer batching vs. alternatives (two chained dispatches)")
+    header = f"{'size':>10} {'naive(ms)':>11} {'wait=False(ms)':>15} {'batched(ms)':>12} {'batched vs naive':>17}"
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        speedup = r["naive_ms"] / r["batched_ms"]
+        print(
+            f"{r['size']:>10} {r['naive_ms']:>11.4f} {r['wait_false_chain_ms']:>15.4f} "
+            f"{r['batched_ms']:>12.4f} {speedup:>16.2f}x"
+        )
 
 
 def git_sha() -> str:
@@ -183,6 +274,8 @@ def main() -> None:
     parser.add_argument("--baseline", type=str, default=None, help="path to a previous results JSON to diff against")
     parser.add_argument("--out-dir", type=str, default=str(Path(__file__).parent / "results"))
     parser.add_argument("--no-save", action="store_true", help="don't write a results JSON")
+    parser.add_argument("--no-command-buffer", action="store_true",
+                         help="skip the CommandBuffer-batching-vs-alternatives benchmark")
     args = parser.parse_args()
 
     sizes = [int(s) for s in args.sizes.split(",")] if args.sizes else DEFAULT_SIZES
@@ -194,6 +287,11 @@ def main() -> None:
     if args.baseline:
         baseline = json.loads(Path(args.baseline).read_text())
         print_comparison(run, baseline)
+
+    if not args.no_command_buffer:
+        device = Device()
+        cb_results = [bench_command_buffer_batching(device, size, args.repeat) for size in sizes]
+        print_command_buffer_table(cb_results)
 
     if not args.no_save:
         out_dir = Path(args.out_dir)

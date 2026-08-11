@@ -10,11 +10,16 @@ set(CMAKE_OBJCXX_STANDARD 17)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(pybind11 CONFIG REQUIRED)
+
+execute_process(
+    COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE NB_DIR)
+list(APPEND CMAKE_PREFIX_PATH "${NB_DIR}")
+find_package(nanobind CONFIG REQUIRED)
 
 set(METAL_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/metal-cpp)
 
-pybind11_add_module(_mtlpy
+nanobind_add_module(_mtlpy
     csrc/metal_impl.mm
     csrc/device.cpp
     csrc/pipeline_cache.cpp
@@ -22,6 +27,7 @@ pybind11_add_module(_mtlpy
     csrc/texture.cpp
     csrc/sampler.cpp
     csrc/pipeline.cpp
+    csrc/command_buffer.cpp
     csrc/bindings.cpp
 )
 

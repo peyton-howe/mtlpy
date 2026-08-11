@@ -1,8 +1,9 @@
 #include "device.h"
 #include "buffer.h"
+#include "command_buffer.h"
+#include "metal_error.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
-#include "pool_guard.h"
 #include "sampler.h"
 #include "texture.h"
 #include <functional>
@@ -18,8 +19,6 @@ namespace {
 void run_blit(MTL::CommandQueue* queue, bool wait,
               const std::function<void(MTL::BlitCommandEncoder*)>& encode,
               const char* error_context) {
-    PoolGuard guard;
-
     auto* cmd = queue->commandBuffer();
     if (!cmd)
         throw std::runtime_error("Failed to create Metal command buffer");
@@ -34,12 +33,7 @@ void run_blit(MTL::CommandQueue* queue, bool wait,
 
     if (wait) {
         cmd->waitUntilCompleted();
-        if (cmd->status() == MTL::CommandBufferStatusError) {
-            std::string err = cmd->error()
-                ? cmd->error()->localizedDescription()->utf8String()
-                : "Unknown GPU error";
-            throw std::runtime_error(std::string(error_context) + " failed: " + err);
-        }
+        throw_if_command_buffer_error(cmd, error_context);
     }
 }
 
@@ -129,6 +123,10 @@ void Device::copy_texture(Texture* src, Texture* dst, bool wait) {
 
 Sampler* Device::create_sampler(bool linear, bool repeat) {
     return new Sampler(device_, linear, repeat);
+}
+
+CommandBuffer* Device::create_command_buffer() {
+    return new CommandBuffer(queue_);
 }
 
 uint32_t Device::max_threads_per_threadgroup() const {
