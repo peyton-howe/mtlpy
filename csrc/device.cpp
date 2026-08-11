@@ -4,6 +4,7 @@
 #include "metal_error.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
+#include "pool_guard.h"
 #include "sampler.h"
 #include "texture.h"
 #include <functional>

@@ -1,9 +1,11 @@
 #include "sampler.h"
+#include "pool_guard.h"
 #include <stdexcept>
 
 namespace mtlpy {
 
 Sampler::Sampler(MTL::Device* device, bool linear, bool repeat) {
+    PoolGuard guard;
     auto* desc = MTL::SamplerDescriptor::alloc()->init();
 
     auto filter = linear ? MTL::SamplerMinMagFilterLinear : MTL::SamplerMinMagFilterNearest;
@@ -23,6 +25,7 @@ Sampler::Sampler(MTL::Device* device, bool linear, bool repeat) {
 }
 
 Sampler::~Sampler() {
+    PoolGuard guard;
     state_->release();
 }
 

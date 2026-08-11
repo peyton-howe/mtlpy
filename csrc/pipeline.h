@@ -1,6 +1,7 @@
 #pragma once
 #include <Metal/Metal.hpp>
 #include <array>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -43,13 +44,28 @@ public:
     // latency itself. Only valid when wait=true (the command buffer hasn't
     // necessarily even started on the GPU, let alone finished, until it
     // completes); (0, 0) when wait=false.
+    //
+    // threadgroup, if given, overrides compute_threadgroup_size()'s
+    // heuristic with an exact threads-per-threadgroup size -- e.g. to match
+    // a tile size a kernel's threadgroup-memory usage depends on. Must
+    // satisfy the same two constraints Metal itself enforces: total threads
+    // (w*h*d) <= max_threads_per_threadgroup, and a multiple of
+    // thread_execution_width (this pipeline is compiled with
+    // threadGroupSizeIsMultipleOfThreadExecutionWidth=true -- see
+    // PipelineCache::get_or_create -- so violating that is undefined
+    // behavior in Metal, not a safe-but-slow fallback). Both are validated
+    // here with a clear error rather than left to fail inside the Metal
+    // validation layer. Applies to both the batched (external_cb) and
+    // self-contained dispatch paths. std::nullopt (the default) keeps the
+    // existing auto-computed behavior.
     std::pair<double, double> run(
         const std::vector<Buffer*>&      buffers,
         const std::vector<Texture*>&     textures,
         const std::vector<Sampler*>&     samplers,
         const std::array<uint32_t, 3>&   grid,
         bool                             wait,
-        CommandBuffer*                   external_cb = nullptr
+        CommandBuffer*                   external_cb = nullptr,
+        const std::optional<std::array<uint32_t, 3>>& threadgroup = std::nullopt
     );
 
     uint32_t thread_execution_width()       const;

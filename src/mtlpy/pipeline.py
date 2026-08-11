@@ -12,7 +12,7 @@ class Pipeline:
 
     def run(self, buffers: list, grid, wait=_WAIT_UNSET,
             textures: list | None = None, samplers: list | None = None,
-            cb: "CommandBuffer | None" = None) -> tuple[float, float]:
+            cb: "CommandBuffer | None" = None, threadgroup=None) -> tuple[float, float]:
         """Returns (gpu_start, gpu_end) in seconds -- pure device-side
         execution time for this dispatch (MTLCommandBuffer's GPUStartTime/
         GPUEndTime), excluding CPU-side encoding/dispatch overhead. Only
@@ -29,7 +29,18 @@ class Pipeline:
         explicitly alongside cb raises ValueError instead of silently
         ignoring it -- a caller who adds cb=cb to an existing wait=True (or
         wait=False) call site should have to notice wait no longer does
-        anything, not have it silently stop applying."""
+        anything, not have it silently stop applying.
+
+        threadgroup optionally overrides the threads-per-threadgroup size
+        Metal would otherwise pick automatically (an int, or a 1-to-3-element
+        sequence -- missing trailing dims are padded with 1, same convention
+        as grid). Useful when a kernel's correctness or performance depends
+        on a specific threadgroup shape, e.g. one matching a
+        threadgroup-memory tile size. Must satisfy both of Metal's own
+        constraints or this raises: total threads (w*h*d) <=
+        max_threads_per_threadgroup, and a multiple of
+        thread_execution_width. Leave as None (the default) to keep the
+        existing auto-computed size. Applies whether or not cb is given."""
         if cb is not None and wait is not _WAIT_UNSET:
             raise ValueError(
                 "wait has no effect when cb is given -- control waiting via "
@@ -39,6 +50,11 @@ class Pipeline:
         wait = True if wait is _WAIT_UNSET else wait
         if isinstance(grid, int):
             grid = [grid, 1, 1]
+        tg = None
+        if threadgroup is not None:
+            if isinstance(threadgroup, int):
+                threadgroup = [threadgroup]
+            tg = list(threadgroup) + [1] * (3 - len(threadgroup))
         return self._pipeline.run(
             [b._buf for b in buffers],
             [t._tex for t in (textures or [])],
@@ -46,6 +62,7 @@ class Pipeline:
             list(grid),
             wait,
             cb._cb if cb is not None else None,
+            tg,
         )
 
     @property

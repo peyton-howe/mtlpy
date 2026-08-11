@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/array.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -219,6 +220,7 @@ NB_MODULE(_mtlpy, m) {
              nb::arg("buffers"), nb::arg("textures"), nb::arg("samplers"),
              nb::arg("grid"), nb::arg("wait") = true,
              nb::arg("command_buffer") = nullptr,
+             nb::arg("threadgroup") = std::nullopt,
              // Pipeline::run touches only raw C++/Metal state after argument
              // conversion (no PyObject* access), so it's safe to release the
              // GIL for the whole call -- otherwise a wait=True dispatch fully
