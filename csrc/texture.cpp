@@ -1,4 +1,5 @@
 #include "texture.h"
+#include "pool_guard.h"
 #include <stdexcept>
 
 namespace mtlpy {
@@ -30,6 +31,8 @@ Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
                   uint32_t usage, bool private_storage)
     : dims_(dims), is_private_(private_storage)
 {
+    PoolGuard guard;
+
     // Validate before allocating anything: texture_type_for() throws on an
     // invalid dims, and doing that after MTL::TextureDescriptor::alloc()
     // would leak the descriptor on the way out.
@@ -52,10 +55,12 @@ Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
 }
 
 Texture::~Texture() {
+    PoolGuard guard;
     tex_->release();
 }
 
 void Texture::upload(const void* bytes, size_t bytes_per_row, size_t bytes_per_image) {
+    PoolGuard guard;
     if (is_private_)
         throw std::runtime_error(
             "upload() requires CPU-visible storage (replaceRegion is not valid on a "
@@ -66,6 +71,7 @@ void Texture::upload(const void* bytes, size_t bytes_per_row, size_t bytes_per_i
 }
 
 void Texture::download(void* bytes, size_t bytes_per_row, size_t bytes_per_image) const {
+    PoolGuard guard;
     if (is_private_)
         throw std::runtime_error(
             "download() requires CPU-visible storage (getBytes is not valid on a "

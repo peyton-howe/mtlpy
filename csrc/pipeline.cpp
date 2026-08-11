@@ -2,20 +2,28 @@
 #include "buffer.h"
 #include "command_buffer.h"
 #include "metal_error.h"
+#include "pool_guard.h"
 #include "sampler.h"
 #include "texture.h"
-#include <Foundation/NSAutoreleasePool.hpp>
 #include <cmath>
 #include <stdexcept>
 
 namespace mtlpy {
 
 namespace {
-// RAII wrapper so the pool is always drained, including on the exception
-// paths in Pipeline::run().
-struct PoolGuard {
-    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
-    ~PoolGuard() { pool->release(); }
+// RAII guard for the self-contained dispatch path's encoder in
+// Pipeline::run(): without this, any *future* exception thrown between
+// computeCommandEncoder() and endEncoding() would release an unterminated
+// MTLComputeCommandEncoder -- fatal (Metal's API validation layer calls
+// abort(), not a catchable exception), the same failure mode the
+// threadgroup-validation reordering above guards against, but structurally
+// rather than by convention. Mirrors CommandBuffer's destructor, which
+// gives the batched dispatch path this same guarantee.
+struct EncoderEndGuard {
+    MTL::ComputeCommandEncoder* encoder;
+    bool ended = false;
+    void end() { encoder->endEncoding(); ended = true; }
+    ~EncoderEndGuard() { if (!ended) encoder->endEncoding(); }
 };
 } // namespace
 
@@ -59,13 +67,52 @@ MTL::Size Pipeline::compute_threadgroup_size(const std::array<uint32_t, 3>& grid
     return MTL::Size::Make(w, h, d);
 }
 
+MTL::Size Pipeline::validate_threadgroup_size(const std::array<uint32_t, 3>& threadgroup) const {
+    const uint32_t w = threadgroup[0], h = threadgroup[1], d = threadgroup[2];
+    if (w == 0 || h == 0 || d == 0) {
+        throw std::runtime_error(
+            "threadgroup size dimensions must all be >= 1, got (" +
+            std::to_string(w) + ", " + std::to_string(h) + ", " + std::to_string(d) + ")"
+        );
+    }
+
+    const uint64_t total   = (uint64_t)w * h * d;
+    const uint32_t max_tot = (uint32_t)state_->maxTotalThreadsPerThreadgroup();
+    if (total > max_tot) {
+        throw std::runtime_error(
+            "threadgroup size (" + std::to_string(w) + ", " + std::to_string(h) + ", " +
+            std::to_string(d) + ") = " + std::to_string(total) + " threads exceeds this "
+            "pipeline's max_threads_per_threadgroup (" + std::to_string(max_tot) + ")"
+        );
+    }
+
+    // Pipelines are compiled with
+    // threadGroupSizeIsMultipleOfThreadExecutionWidth=true (see
+    // PipelineCache::get_or_create), which is a promise to Metal, not a
+    // request -- dispatching with a threadgroup size that breaks it is
+    // undefined behavior, so this is checked up front with a clear message
+    // instead of surfacing however the Metal validation layer happens to
+    // fail (or silently corrupting results with validation disabled).
+    const uint32_t tew = (uint32_t)state_->threadExecutionWidth();
+    if (total % tew != 0) {
+        throw std::runtime_error(
+            "threadgroup size (" + std::to_string(w) + ", " + std::to_string(h) + ", " +
+            std::to_string(d) + ") = " + std::to_string(total) + " threads must be a "
+            "multiple of this pipeline's thread_execution_width (" + std::to_string(tew) + ")"
+        );
+    }
+
+    return MTL::Size::Make(w, h, d);
+}
+
 std::pair<double, double> Pipeline::run(
     const std::vector<Buffer*>&    buffers,
     const std::vector<Texture*>&   textures,
     const std::vector<Sampler*>&   samplers,
     const std::array<uint32_t, 3>& grid,
     bool                           wait,
-    CommandBuffer*                 external_cb
+    CommandBuffer*                 external_cb,
+    const std::optional<std::array<uint32_t, 3>>& threadgroup
 ) {
     // PoolGuard covers both branches below (not just the self-contained
     // one) -- it's stack-scoped to this single function call either way,
@@ -103,8 +150,16 @@ std::pair<double, double> Pipeline::run(
             );
         }
 
+        // Resolved before either branch below ever touches a Metal encoder:
+        // validate_threadgroup_size() throws on a bad size, and an encoder
+        // that's bound but never reaches endEncoding() is fatal in Metal
+        // (API validation calls abort(), not a catchable exception) once
+        // it's released -- see the PoolGuard drain above/below. Neither
+        // path here touches Metal state, so there's nothing to unwind.
         MTL::Size grid_size         = MTL::Size::Make(grid[0], grid[1], grid[2]);
-        MTL::Size threads_per_group = compute_threadgroup_size(grid);
+        MTL::Size threads_per_group = threadgroup
+            ? validate_threadgroup_size(*threadgroup)
+            : compute_threadgroup_size(grid);
 
         // Binds buffers/textures/samplers and dispatches -- does NOT set
         // the pipeline state, unlike the old single combined lambda: the
@@ -146,10 +201,11 @@ std::pair<double, double> Pipeline::run(
         auto* encoder = cmd->computeCommandEncoder();
         if (!encoder)
             throw std::runtime_error("Failed to create compute encoder");
+        EncoderEndGuard encoder_guard{encoder};
 
         encoder->setComputePipelineState(state_);
         bind_resources_and_dispatch(encoder);
-        encoder->endEncoding();
+        encoder_guard.end();
 
         cmd->commit();
 

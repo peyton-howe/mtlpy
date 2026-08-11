@@ -4,6 +4,7 @@
 #include "metal_error.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
+#include "pool_guard.h"
 #include "sampler.h"
 #include "texture.h"
 #include <functional>
@@ -19,6 +20,8 @@ namespace {
 void run_blit(MTL::CommandQueue* queue, bool wait,
               const std::function<void(MTL::BlitCommandEncoder*)>& encode,
               const char* error_context) {
+    PoolGuard guard;
+
     auto* cmd = queue->commandBuffer();
     if (!cmd)
         throw std::runtime_error("Failed to create Metal command buffer");
@@ -40,6 +43,7 @@ void run_blit(MTL::CommandQueue* queue, bool wait,
 } // namespace
 
 Device::Device(int index) {
+    PoolGuard guard;
     if (index < 0) {
         device_ = MTL::CreateSystemDefaultDevice();
     } else {
@@ -72,6 +76,7 @@ Device::Device(int index) {
 }
 
 Device::~Device() {
+    PoolGuard guard;
     delete cache_;
     queue_->release();
     device_->release();
@@ -136,6 +141,7 @@ void Device::flush_cache() {
 }
 
 std::vector<std::string> Device::available_device_names() {
+    PoolGuard guard;
     std::vector<std::string> names;
     auto* all = MTL::CopyAllDevices();
     if (all) {

@@ -124,6 +124,68 @@ kernel void square(
         pipeline.run([a], 4)  # missing the output buffer
 
 
+def test_custom_shader_with_explicit_threadgroup(device):
+    source = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void square(
+    device const float *a [[buffer(0)]],
+    device       float *b [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    b[id] = a[id] * a[id];
+}
+"""
+    pipeline = device.compile(source, "square")
+    a = device.buffer(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+    b = device.empty(4, np.float32)
+    tew = pipeline.thread_execution_width
+    pipeline.run([a, b], 4, threadgroup=tew)
+    np.testing.assert_array_almost_equal(b.contents, [1.0, 4.0, 9.0, 16.0])
+
+
+def test_threadgroup_not_multiple_of_execution_width_raises(device):
+    pipeline = device.compile(
+        """
+#include <metal_stdlib>
+using namespace metal;
+kernel void square(
+    device const float *a [[buffer(0)]],
+    device       float *b [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    b[id] = a[id] * a[id];
+}
+""",
+        "square",
+    )
+    a = device.buffer(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+    b = device.empty(4, np.float32)
+    with pytest.raises(RuntimeError):
+        pipeline.run([a, b], 4, threadgroup=1)  # not a multiple of thread_execution_width
+
+
+def test_threadgroup_exceeding_max_raises(device):
+    pipeline = device.compile(
+        """
+#include <metal_stdlib>
+using namespace metal;
+kernel void square(
+    device const float *a [[buffer(0)]],
+    device       float *b [[buffer(1)]],
+    uint id [[thread_position_in_grid]])
+{
+    b[id] = a[id] * a[id];
+}
+""",
+        "square",
+    )
+    a = device.buffer(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+    b = device.empty(4, np.float32)
+    with pytest.raises(RuntimeError):
+        pipeline.run([a, b], 4, threadgroup=pipeline.max_threads_per_threadgroup + 1)
+
+
 def test_pipeline_cache(device):
     a = device.buffer(np.ones(1000, dtype=np.float32))
     b = device.buffer(np.ones(1000, dtype=np.float32))
