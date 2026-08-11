@@ -1,0 +1,82 @@
+// Parametric twin of gaussian_blur_tiled_kernel.txt for
+// threadgroup_size_bench.py: TILE_X/TILE_Y are left as #defines instead of
+// being hardcoded to 32, so the same source can be recompiled once per
+// candidate threadgroup shape. threadgroup_size_bench.py prepends
+// `#define TILE_X <n>` / `#define TILE_Y <n>` before this text.
+//
+// This kernel is a correctness demonstration, not just a performance one:
+// the threadgroup-memory tile array below is sized from TILE_X/TILE_Y at
+// *compile* time, but the cooperative load loop and the base_x/base_y tile
+// origin only produce correct output when the pipeline is actually
+// *dispatched* with threads-per-threadgroup == (TILE_X, TILE_Y). Dispatch
+// with a mismatched threadgroup size (e.g. the auto-computed default) and
+// this silently produces wrong pixels -- gaps/overlaps if the mismatch is
+// small, or an out-of-bounds threadgroup-memory write if the dispatched
+// size is larger than TILE_X/TILE_Y in either dimension. That's exactly
+// the case Pipeline.run(..., threadgroup=...)'s explicit override exists
+// for.
+
+#include <metal_stdlib>
+using namespace metal;
+
+constant float gaussian[5][5] = {
+    {1.0/256, 4.0/256,  6.0/256,  4.0/256, 1.0/256},
+    {4.0/256, 16.0/256, 24.0/256, 16.0/256, 4.0/256},
+    {6.0/256, 24.0/256, 36.0/256, 24.0/256, 6.0/256},
+    {4.0/256, 16.0/256, 24.0/256, 16.0/256, 4.0/256},
+    {1.0/256, 4.0/256,  6.0/256,  4.0/256, 1.0/256},
+};
+
+#define HALO 2
+#define SHARED_DIM_X (TILE_X + 2 * HALO)
+#define SHARED_DIM_Y (TILE_Y + 2 * HALO)
+
+kernel void gaussian_buffer_tiled(
+    device const float *input  [[buffer(0)]],
+    device       float *output [[buffer(1)]],
+    constant uint &width       [[buffer(2)]],
+    constant uint &height      [[buffer(3)]],
+    uint2 gid      [[thread_position_in_grid]],
+    uint2 tid      [[thread_position_in_threadgroup]],
+    uint2 tg_id    [[threadgroup_position_in_grid]],
+    uint2 tg_size  [[threads_per_threadgroup]])
+{
+    threadgroup float tile[SHARED_DIM_Y][SHARED_DIM_X];
+
+    const int W = int(width);
+    const int H = int(height);
+
+    const int base_x = int(tg_id.x) * TILE_X - HALO;
+    const int base_y = int(tg_id.y) * TILE_Y - HALO;
+
+    const uint load_w = tg_size.x + 2 * HALO;
+    const uint load_h = tg_size.y + 2 * HALO;
+    const uint flat_id = tid.y * tg_size.x + tid.x;
+    const uint num_threads = tg_size.x * tg_size.y;
+    const uint tile_elems = load_w * load_h;
+
+    for (uint idx = flat_id; idx < tile_elems; idx += num_threads) {
+        uint ly = idx / load_w;
+        uint lx = idx % load_w;
+        int gx = clamp(base_x + int(lx), 0, W - 1);
+        int gy = clamp(base_y + int(ly), 0, H - 1);
+        tile[ly][lx] = input[gy * W + gx];
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (gid.x >= width || gid.y >= height)
+        return;
+
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            float w = gaussian[dy + 2][dx + 2];
+            sum += tile[tid.y + HALO + dy][tid.x + HALO + dx] * w;
+            wsum += w;
+        }
+    }
+
+    output[gid.y * width + gid.x] = sum / wsum;
+}

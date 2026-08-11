@@ -122,6 +122,15 @@ std::pair<double, double> Pipeline::run(
         );
     }
 
+    // Resolved before any Metal encoder exists: validate_threadgroup_size()
+    // throws on a bad size, and an encoder that's bound but never reaches
+    // endEncoding() is fatal in Metal (API validation calls abort(), not a
+    // catchable exception) once it's released -- see the PoolGuard drain
+    // below. Neither path touches Metal state, so there's nothing to unwind.
+    MTL::Size threads_per_group = threadgroup
+        ? validate_threadgroup_size(*threadgroup)
+        : compute_threadgroup_size(grid);
+
     PoolGuard guard;
 
     // Must retain references: with wait=False the caller can drop its last
@@ -147,10 +156,7 @@ std::pair<double, double> Pipeline::run(
     for (size_t i = 0; i < samplers.size(); ++i)
         encoder->setSamplerState(samplers[i]->mtl(), i);
 
-    MTL::Size grid_size         = MTL::Size::Make(grid[0], grid[1], grid[2]);
-    MTL::Size threads_per_group = threadgroup
-        ? validate_threadgroup_size(*threadgroup)
-        : compute_threadgroup_size(grid);
+    MTL::Size grid_size = MTL::Size::Make(grid[0], grid[1], grid[2]);
 
     encoder->dispatchThreads(grid_size, threads_per_group);
     encoder->endEncoding();
