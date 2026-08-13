@@ -22,8 +22,19 @@ public:
     // synchronizeResource() first. Device::copy_buffer() (blit-copy into a
     // fresh Shared buffer) is the storage-mode-agnostic way to read a
     // non-Shared Buffer's contents -- see Buffer.to_storage() in buffer.py,
-    // which every CPU-reading path (contents/.numpy()/__dlpack__) goes
-    // through first when needed.
+    // which every public CPU-reading path (contents/.numpy()/__dlpack__)
+    // goes through first, so this should never actually throw for a caller
+    // going through the public Python API. It's a C++-level backstop for
+    // anyone touching this class directly (a future native binding, or
+    // Python code that reaches into the private `_buf` handle) -- as such
+    // it throws a plain std::runtime_error (-> Python RuntimeError), not
+    // the BufferError Buffer.__dlpack__ raises for the same underlying
+    // condition on the public API: that's a deliberate, not accidental,
+    // difference -- BufferError is the Python-idiomatic type for a
+    // buffer-protocol-shaped failure (matches this project's existing
+    // __dlpack__ convention), while RuntimeError is this codebase's
+    // blanket convention for C++-thrown validation everywhere else (see
+    // e.g. Texture::upload()/download()'s equivalent storage-mode guards).
     void*        contents_ptr() const;
     size_t       size_bytes()   const { return size_bytes_; }
     uint32_t     storage_mode() const { return storage_mode_; }

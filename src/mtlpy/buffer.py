@@ -27,10 +27,13 @@ class Buffer:
 
     def to_storage(self, storage: StorageMode) -> Buffer:
         """A new Buffer holding a copy of this Buffer's data in a different
-        storage mode, via a GPU-side blit copy (Device.copy_buffer()) --
-        unlike a CPU memcpy, this works no matter which storage mode(s) are
-        involved (including Private, which has no CPU-visible memory at
-        all). Returns self unchanged (no copy) if already in storage."""
+        storage mode, via a GPU-side blit copy (MTLBlitCommandEncoder,
+        wrapped by the internal Device::copy_buffer() -- there's no public
+        Device.copy_buffer() Python method, this is the only way to reach
+        it) -- unlike a CPU memcpy, this works no matter which storage
+        mode(s) are involved (including Private, which has no CPU-visible
+        memory at all). Returns self unchanged (no copy) if already in
+        storage."""
         storage = StorageMode(storage)
         if storage == self.storage:
             return self
@@ -42,28 +45,43 @@ class Buffer:
     @property
     def contents(self) -> np.ndarray:
         """CPU-visible flat view over this Buffer's data. For a Shared
-        Buffer, this is a live, zero-copy view over the actual GPU memory --
-        writes here are writes to what the GPU sees, no separate flush
-        needed. A Private/Managed Buffer has no CPU memory that's safe to
-        read directly (see StorageMode's docstring), so this transparently
-        materializes a Shared copy first via to_storage() -- safe to call
-        either way, but for those two storage modes the result is a
-        snapshot: neither further GPU writes to this Buffer nor writes to
-        the returned array affect the other."""
+        Buffer, this is a live, writable, zero-copy view over the actual GPU
+        memory -- writes here are writes to what the GPU sees, no separate
+        flush needed. A Private/Managed Buffer has no CPU memory that's safe
+        to read directly (see StorageMode's docstring), so this
+        transparently materializes a Shared copy first via to_storage() --
+        safe to call either way, but for those two storage modes the result
+        is a disconnected, read-only snapshot: it's marked non-writeable
+        (assigning into it raises ValueError) precisely because a write
+        there would silently vanish instead of reaching this Buffer's actual
+        memory -- neither further GPU writes to this Buffer nor writes to
+        the returned array could ever affect the other. To write into a
+        Private/Managed Buffer, upload into a Shared staging Buffer and
+        .to_storage() it, or write via a compute kernel.
+
+        Calling this repeatedly on the same Private/Managed Buffer redoes
+        the full allocate + blit-copy + wait round trip every time (nothing
+        is cached on this Buffer) -- if you need the data more than once,
+        save the returned array instead of calling .contents/.numpy() again."""
         buf        = self.to_storage(StorageMode.SHARED)
         nbytes     = buf.size * buf.dtype.itemsize
         ctypes_arr = (ctypes.c_byte * nbytes).from_address(buf._buf.data_ptr)
         arr        = np.ctypeslib.as_array(ctypes_arr).view(buf.dtype).view(_BackedArray)
         arr._mtlpy_buf = buf            # keep the (possibly materialized) Buffer alive
+        if buf is not self:
+            # buf is a throwaway snapshot to_storage() just materialized --
+            # writing into it would silently never reach self's real memory,
+            # so make that impossible instead of a silent no-op.
+            arr.flags.writeable = False
         return arr
 
     def numpy(self) -> np.ndarray:
         """Contents reshaped to this Buffer's .shape -- unlike .contents
         (always flat, see the property above), this looks like the array
-        you created the Buffer from. Zero-copy for a Shared Buffer
-        (reshaping a flat contiguous array is always a view, never a copy,
-        so this is just as live as .contents); for Private/Managed this
-        carries .contents' snapshot-copy caveat instead."""
+        you created the Buffer from. Zero-copy and writable for a Shared
+        Buffer (reshaping a flat contiguous array is always a view, never a
+        copy, so this is just as live as .contents); for Private/Managed
+        this carries .contents' read-only-snapshot caveat instead."""
         return self.contents.reshape(self.shape)
 
     @property
@@ -143,7 +161,7 @@ class Buffer:
         dst_metal  = utils.to_metal(dst_dtype)
         source     = shader.cast_kernel(src_metal, dst_metal)
         pipeline   = self._device.compile(source, "cast")
-        out        = self._device.empty(self.shape, dst_dtype)
+        out        = self._device.empty(self.shape, dst_dtype, storage=self.storage)
         pipeline.run([self, out], self.size)
         return out
 

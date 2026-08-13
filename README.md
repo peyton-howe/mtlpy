@@ -71,12 +71,19 @@ examples/            Runnable usage examples
 ```
 
 Each `Device` in Python owns exactly one `MTL::Device`, one `MTL::CommandQueue`,
-and one `PipelineCache`. Buffers use `MTL::ResourceStorageModeShared`, so on
-Apple Silicon's unified memory there's no copy between CPU and GPU views of
-the same allocation — `Buffer.contents` is a NumPy array backed directly by
-GPU-visible memory (accessing `.contents` is a true zero-copy view; writing
-new data into it via `buf.contents[:] = arr` is still a real memcpy from
-`arr`'s own memory, same as it would be for any destination).
+and one `PipelineCache`. Buffers default to `MTL::ResourceStorageModeShared`
+(`Device.buffer()`/`.empty()`'s `storage=` parameter, `mtlpy.StorageMode`,
+picks `MANAGED`/`PRIVATE` instead), so on Apple Silicon's unified memory
+there's no copy between CPU and GPU views of the same allocation —
+`Buffer.contents` is a NumPy array backed directly by GPU-visible memory
+(accessing `.contents` is a true zero-copy, writable view; writing new data
+into it via `buf.contents[:] = arr` is still a real memcpy from `arr`'s own
+memory, same as it would be for any destination). This zero-copy, writable
+view only holds for the default `SHARED` storage — for `PRIVATE`/`MANAGED`
+buffers, which have no CPU-visible memory to view directly, `.contents`
+transparently materializes a **read-only snapshot** copy instead (writing
+into it raises `ValueError` rather than silently doing nothing); see
+`Buffer.to_storage()` to convert a `Buffer` between storage modes.
 
 ## Features
 
@@ -251,7 +258,11 @@ Every `Buffer` implements the [DLPack](https://github.com/dmlc/dlpack)
 protocol (`__dlpack__`/`__dlpack_device__`), tagged as Metal-backed
 (`kDLMetal`) rather than plain CPU memory. Any DLPack-aware library gets a
 genuine zero-copy view over the same `id<MTLBuffer>` — no allocation, no
-`memcpy` — just by taking the `Buffer` directly:
+`memcpy` — just by taking the `Buffer` directly. This requires the default
+`SHARED` storage mode (see `mtlpy.StorageMode`): a `PRIVATE`/`MANAGED`
+`Buffer` raises `BufferError` from `__dlpack__`, since there's no
+CPU-visible memory to hand a consumer zero-copy — call
+`buf.to_storage(mtlpy.StorageMode.SHARED)` first to get an exportable copy.
 
 ```python
 import mlx.core as mx

@@ -233,7 +233,10 @@ class Device:
         metal_type = utils.to_metal(a.dtype)
         pipeline   = self.compile(shader_fn(metal_type), name)
         if out is None:
-            out = self.empty(a.shape, a.dtype)
+            # Matches a's storage, not the default -- an op on Private
+            # operands should produce a Private result, not silently
+            # downgrade to Shared (see Buffer.to_storage()/StorageMode).
+            out = self.empty(a.shape, a.dtype, storage=a.storage)
         # Safe to alias out with a/b: each GPU thread reads then writes only
         # its own index, so an in-place dispatch (out is a or b) has no
         # cross-thread data hazard.
@@ -243,16 +246,22 @@ class Device:
     def _scalar_op(self, name: str, shader_fn, a: Buffer, scalar, out: Buffer | None = None) -> Buffer:
         metal_type = utils.to_metal(a.dtype)
         pipeline   = self.compile(shader_fn(metal_type), name)
+        # Always Shared regardless of a's storage: this needs a plain CPU
+        # write (.contents[:] = ...) to stage the scalar value, which only
+        # Shared storage supports -- see Device.buffer()'s ndarray path.
+        # Mixing a Shared operand with a non-Shared a/out in one dispatch is
+        # ordinary, fully-supported Metal usage (hazard tracking is
+        # per-resource, not storage-mode-dependent).
         scalar_buf = self.buffer(np.array([scalar], dtype=a.dtype))
         if out is None:
-            out = self.empty(a.shape, a.dtype)
+            out = self.empty(a.shape, a.dtype, storage=a.storage)
         pipeline.run([a, scalar_buf, out], a.size)
         return out
 
     def _negate_op(self, a: Buffer) -> Buffer:
         metal_type = utils.to_metal(a.dtype)
         pipeline   = self.compile(shader.negate_kernel(metal_type), "negate")
-        out        = self.empty(a.shape, a.dtype)
+        out        = self.empty(a.shape, a.dtype, storage=a.storage)
         pipeline.run([a, out], a.size)
         return out
 
@@ -268,15 +277,17 @@ class Device:
             raise TypeError(f"Buffer dtype mismatch: {a.dtype} != {b.dtype}")
         metal_type = utils.to_metal(a.dtype)
         pipeline   = self.compile(shader_fn(metal_type), name)
-        out        = self.empty(a.shape, np.bool_)
+        out        = self.empty(a.shape, np.bool_, storage=a.storage)
         pipeline.run([a, b, out], a.size)
         return out
 
     def _compare_scalar_op(self, name: str, shader_fn, a: Buffer, scalar) -> Buffer:
         metal_type = utils.to_metal(a.dtype)
         pipeline   = self.compile(shader_fn(metal_type), name)
+        # See _scalar_op's comment -- scalar_buf must stay Shared regardless
+        # of a's storage.
         scalar_buf = self.buffer(np.array([scalar], dtype=a.dtype))
-        out        = self.empty(a.shape, np.bool_)
+        out        = self.empty(a.shape, np.bool_, storage=a.storage)
         pipeline.run([a, scalar_buf, out], a.size)
         return out
 

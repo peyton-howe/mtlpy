@@ -126,6 +126,17 @@ void Device::copy_texture(Texture* src, Texture* dst, bool wait) {
 
 void Device::copy_buffer(Buffer* src, size_t src_offset, Buffer* dst, size_t dst_offset,
                           size_t size_bytes, bool wait) {
+    // Metal's own validation for an out-of-range blit surfaces as an
+    // uncatchable Objective-C exception (process abort), not a Python
+    // exception -- check here first so a bad offset/size raises a normal,
+    // catchable std::runtime_error instead (same reasoning as
+    // Texture.upload_from_buffer()'s equivalent Python-side check).
+    if (src_offset + size_bytes > src->size_bytes())
+        throw std::runtime_error(
+            "copy_buffer: src_offset + size_bytes exceeds source buffer's size_bytes");
+    if (dst_offset + size_bytes > dst->size_bytes())
+        throw std::runtime_error(
+            "copy_buffer: dst_offset + size_bytes exceeds destination buffer's size_bytes");
     run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
         blit->copyFromBuffer(src->mtl(), src_offset, dst->mtl(), dst_offset, size_bytes);
     }, "GPU buffer-to-buffer copy");
