@@ -25,7 +25,7 @@ NB_MODULE(_mtlpy, m) {
     nb::class_<Device>(m, "Device")
         .def(nb::init<int>(), nb::arg("index") = -1)
         .def("create_buffer", &Device::create_buffer,
-             nb::arg("size_bytes"),
+             nb::arg("size_bytes"), nb::arg("storage_mode"),
              nb::rv_policy::take_ownership,
              nb::keep_alive<0, 1>())   // keep Device alive while Buffer is alive
         .def("compile", &Device::compile,
@@ -62,6 +62,10 @@ NB_MODULE(_mtlpy, m) {
         .def("copy_texture", &Device::copy_texture,
              nb::arg("src"), nb::arg("dst"), nb::arg("wait"),
              nb::call_guard<nb::gil_scoped_release>())
+        .def("copy_buffer", &Device::copy_buffer,
+             nb::arg("src"), nb::arg("src_offset"), nb::arg("dst"), nb::arg("dst_offset"),
+             nb::arg("size_bytes"), nb::arg("wait"),
+             nb::call_guard<nb::gil_scoped_release>())
         .def("create_sampler", &Device::create_sampler,
              nb::arg("linear"), nb::arg("repeat"),
              nb::rv_policy::take_ownership,
@@ -82,15 +86,18 @@ NB_MODULE(_mtlpy, m) {
             return reinterpret_cast<uintptr_t>(b.mtl());
         })
         .def_prop_ro("size_bytes", &Buffer::size_bytes)
+        .def_prop_ro("storage_mode", &Buffer::storage_mode)
         .def("_dlpack_capsule", [](const Buffer& b, uint8_t dtype_code, uint8_t dtype_bits,
                                     std::vector<int64_t> shape) {
             // Backs Buffer.__dlpack__ (src/mtlpy/buffer.py) -- builds a
             // DLManagedTensor tagged kDLMetal, with DLTensor.data set to the
             // id<MTLBuffer> handle itself (verified zero-copy against MLX:
             // mx.asarray(buf, copy=False) reads/writes the same underlying
-            // Metal allocation, no copy). Every mtlpy Buffer is allocated
-            // MTL::ResourceStorageModeShared (see buffer.cpp), so it's always
-            // eligible -- there's no private-storage Buffer to reject here.
+            // Metal allocation, no copy). Buffer.__dlpack__ already rejects a
+            // non-Shared Buffer before ever reaching here (Private has no
+            // CPU-visible memory to hand a consumer zero-copy, and Managed
+            // needs an explicit synchronize DLPack consumers won't do), so
+            // this can assume Shared storage unconditionally.
             //
             // Lifetime: retain()/release() the underlying MTL::Buffer
             // directly (independent of this C++ Buffer wrapper or the

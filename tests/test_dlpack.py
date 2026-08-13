@@ -78,8 +78,9 @@ def test_mlx_asarray_is_zero_copy(device):
 
 def test_mlx_asarray_default_copy_is_still_zero_copy(device):
     """copy=None (mx.asarray's default) is documented as "share memory when
-    possible, copy otherwise" -- since a Buffer is always kDLMetal/Shared
-    (see __dlpack__), it should still come through zero-copy without
+    possible, copy otherwise" -- since this Buffer is Shared storage (the
+    default -- see mtlpy.StorageMode; __dlpack__ rejects Private/Managed
+    buffers outright), it should still come through zero-copy without
     needing copy=False explicitly."""
     buf = device.buffer(np.array([1.0, 2.0, 3.0], dtype=np.float32))
     arr = mx.asarray(buf)

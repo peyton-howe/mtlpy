@@ -7,10 +7,11 @@ if sys.platform != "darwin":
 from .device import Device, list_devices
 from .buffer import Buffer
 from .texture import Sampler, Texture
+from .utils import StorageMode
 from . import operators
 
 # Read from the installed package's own metadata (which scikit-build-core
 # generates from pyproject.toml's [project].version at build time) instead
 # of a hardcoded string.
 __version__ = _version("mtlpy")
-__all__ = ["Device", "Buffer", "Texture", "Sampler", "operators", "list_devices"]
+__all__ = ["Device", "Buffer", "Texture", "Sampler", "StorageMode", "operators", "list_devices"]
