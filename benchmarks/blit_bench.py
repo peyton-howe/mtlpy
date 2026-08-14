@@ -200,7 +200,7 @@ def print_table(title: str, sizes, rows, columns) -> None:
     for (height, width), values in zip(sizes, rows):
         best_i = min(range(len(values)), key=lambda i: values[i])
         cells = " ".join(f"{v:>20.4f}" for v in values)
-        print(f"{height}x{width:<7} {cells}  {columns[best_i]}")
+        print(f"{f'{height}x{width}':>12} {cells}  {columns[best_i]}")
     print()
 
 

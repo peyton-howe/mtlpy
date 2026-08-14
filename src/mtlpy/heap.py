@@ -22,39 +22,37 @@ class Heap:
     sub-allocation from it (a different Buffer/Texture every call, not the
     same one reused) skips almost all of that first-write cost: measured
     within ~4% of reusing a single already-warm Buffer, and ~4x cheaper
-    than a fresh standalone allocation, at every size tested. Concretely,
-    staging Texture.upload_from_buffer()/.download_to_buffer() through a
-    Heap instead of a standalone Buffer measured ~1.9-3.4x faster (upload,
-    at 1080p/4K) and ~1.5-2.4x faster (download, any size) than this
-    library's own default .upload()/.download() implementations.
+    than a fresh standalone allocation, at every size tested. This is
+    exactly why Texture.upload()/.download() sub-allocate from an internal,
+    auto-growing Heap of their own by default (Device._staging_buffer(),
+    see its docstring) instead of a standalone Buffer -- you get this win
+    automatically without ever touching this class directly.
 
-    Why Device.buffer()/.empty()/.empty_texture() -- NOT this -- are still
-    the library's own default, including inside .download() (see its
-    docstring): a Heap has a *fixed* capacity chosen at creation time. If
-    you hold many results alive at once (e.g. accumulating .download()
-    results in a list before processing them), each one keeps its backing
-    Buffer alive, and a shared internal Heap sized for "however many
-    mtlpy guessed" would eventually run out and raise
-    "insufficient free space" under a pattern that works fine today with
-    standalone allocation (confirmed: a Heap sized for 20 buffers fails on
-    the 21st one held alive simultaneously, with a clean RuntimeError, not
-    a crash -- but a failure all the same). The right heap size is
-    inherently workload-dependent (how many buffers do *you* need alive at
-    once?), which only the caller can answer -- so mtlpy doesn't guess it
-    for you inside a stateless method. If your workload needs maximum
-    throughput and you know your own concurrency bound, size a Heap for it
-    yourself and reuse it across many upload_from_buffer()/
-    download_to_buffer() calls; if you only need one buffer at a time
-    (the common case), reusing a single standalone Buffer across a hot
-    loop is simpler and just as fast (see the upload_from_buffer()/
-    download_to_buffer() docstrings) -- no Heap required.
+    Why you'd still want your *own* Heap on top of that automatic one: the
+    internal staging Heap behind .upload()/.download() only ever holds
+    *one* buffer's worth of space at a time (both methods guarantee their
+    staging Buffer is unreferenced before they return) -- it structurally
+    can't help if you want several independent results alive at once (e.g.
+    accumulating .download_to_buffer() results in a list before processing
+    them together). A Heap has a *fixed* capacity chosen at creation time,
+    so a shared internal Heap sized for "however many mtlpy guessed" would
+    eventually run out and raise "insufficient free space" under a pattern
+    that works fine today with standalone allocation (confirmed: a Heap
+    sized for 20 buffers fails on the 21st one held alive simultaneously,
+    with a clean RuntimeError, not a crash -- but a failure all the same).
+    The right heap size is inherently workload-dependent (how many buffers
+    do *you* need alive at once?), which only the caller can answer -- so
+    mtlpy doesn't guess it for you inside a stateless method. If your
+    workload needs several independent results alive concurrently and you
+    know your own concurrency bound, size a Heap for it yourself and reuse
+    it across many upload_from_buffer()/download_to_buffer() calls; if you
+    only need one buffer at a time (the common case), .upload()/.download()
+    already give you this Heap's performance for free -- no manual Heap
+    required.
 
     This is intentionally the minimal Metal heap surface: automatic-type
     heaps only (no placement/sparse heaps), no aliasing control (every
-    resource is non-aliased, Metal's default), no purgeability API.
-    Device.buffer()/.empty()/.empty_texture() (standalone allocations, not
-    heap-backed) remain the default, simpler path for everything that
-    isn't a hot allocate/free loop."""
+    resource is non-aliased, Metal's default), no purgeability API."""
 
     def __init__(self, _heap, storage: StorageMode, device):
         self._heap   = _heap    # _mtlpy.Heap
