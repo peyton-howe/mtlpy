@@ -1,6 +1,7 @@
 #include "device.h"
 #include "buffer.h"
 #include "command_buffer.h"
+#include "heap.h"
 #include "metal_error.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
@@ -86,6 +87,10 @@ Buffer* Device::create_buffer(size_t size_bytes, uint32_t storage_mode) {
     return new Buffer(device_, size_bytes, storage_mode);
 }
 
+Heap* Device::create_heap(size_t size_bytes, uint32_t storage_mode) {
+    return new Heap(device_, size_bytes, storage_mode);
+}
+
 Pipeline* Device::compile(const std::string& source, const std::string& function_name) {
     auto cached = cache_->get_or_create(device_, source, function_name);
     return new Pipeline(cached.state, queue_, cached.required_buffer_count,
@@ -110,6 +115,20 @@ void Device::blit_upload_texture(Buffer* buf, size_t offset, Texture* tex,
                               tex->mtl(), /*destinationSlice=*/0, /*destinationLevel=*/0,
                               MTL::Origin(0, 0, 0));
     }, "GPU blit upload");
+}
+
+void Device::blit_download_texture(Texture* tex, Buffer* buf, size_t offset,
+                                    size_t bytes_per_row, size_t bytes_per_image, bool wait) {
+    MTL::Size size = MTL::Size::Make(
+        tex->width(),
+        tex->dims() >= 2 ? tex->height() : 1,
+        tex->dims() >= 3 ? tex->depth()  : 1
+    );
+    run_blit(queue_, wait, [&](MTL::BlitCommandEncoder* blit) {
+        blit->copyFromTexture(tex->mtl(), /*sourceSlice=*/0, /*sourceLevel=*/0,
+                               MTL::Origin(0, 0, 0), size,
+                               buf->mtl(), offset, bytes_per_row, bytes_per_image);
+    }, "GPU blit download");
 }
 
 void Device::optimize_texture_for_gpu_access(Texture* tex, bool wait) {

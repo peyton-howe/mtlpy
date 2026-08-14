@@ -1,10 +1,11 @@
 from __future__ import annotations
 import numpy as np
 from .buffer import Buffer
+from .heap import Heap
 from .pipeline import CommandBuffer, Pipeline
 from .texture import Sampler, Texture
 from . import utils, shader
-from .utils import StorageMode
+from .utils import StorageMode, TEXTURE_USAGE_SHADER_READ, TEXTURE_USAGE_SHADER_WRITE
 
 try:
     from . import _mtlpy
@@ -14,10 +15,27 @@ except ImportError as e:
     ) from e
 
 
-# MTL::TextureUsageShaderRead/ShaderWrite raw values (Metal/MTLTexture.hpp) --
-# see Device.empty_texture()'s readable/writable params.
-_TEXTURE_USAGE_SHADER_READ  = 1
-_TEXTURE_USAGE_SHADER_WRITE = 1 << 1
+def _texture_buffer_layout(tex: Texture, buf: Buffer, offset: int) -> tuple[int, int]:
+    """Shared validation for Device.blit_upload_texture()/blit_download_texture()
+    (and Texture.upload_from_buffer(), which delegates to the former): buf
+    must hold tex's data tightly packed (dtype matching tex's per-channel
+    dtype) starting at a byte offset into buf. Returns the
+    bytes_per_row/bytes_per_image describing that layout, for the blit
+    encoder call."""
+    if buf.dtype != tex.dtype:
+        raise TypeError(
+            f"Buffer dtype {buf.dtype} doesn't match texture pixel_format "
+            f"{tex.pixel_format!r}'s per-channel dtype {tex.dtype}"
+        )
+    expected_bytes = utils.shape_size(tex.shape) * tex.dtype.itemsize
+    buf_bytes = buf.size * buf.dtype.itemsize
+    if offset + expected_bytes > buf_bytes:
+        raise ValueError(
+            f"Buffer has {buf_bytes} bytes, but offset={offset} plus this "
+            f"{tex.shape} texture's {expected_bytes} bytes needs "
+            f"{offset + expected_bytes}"
+        )
+    return tex._bytes_per_row_and_image()
 
 
 def list_devices() -> list[str]:
@@ -36,9 +54,13 @@ class Device:
         # read_t, store_t, channels, normalized) signature buffer_from_texture()
         # generates MSL source from -- avoids re-generating an identical
         # source string and re-hitting the C++ PipelineCache's string-hash
-        # lookup on every to_buffer()/download_fast() call for the same
-        # texture shape/format (e.g. repeated per-frame GPU readback).
+        # lookup on every to_buffer() call for the same texture shape/format
+        # (e.g. repeated per-frame GPU readback).
         self._texture_to_buffer_pipelines: dict = {}
+        # Backs _staging_buffer() -- see its docstring. Grown lazily, never
+        # shrunk: bounded by the largest single Texture.upload()/.download()
+        # this Device has ever done, not by how many have happened.
+        self._staging_heap: Heap | None = None
 
     @property
     def mtl_ptr(self) -> int:
@@ -92,8 +114,96 @@ class Device:
         raw = self._dev.create_buffer(flat_size * np.dtype(dt).itemsize, int(StorageMode(storage)))
         return Buffer(raw, dt, shape, self)
 
+    def _staging_buffer(self, n_elements: int, dtype) -> Buffer:
+        """Internal Shared Buffer, sub-allocated from a lazily-grown Heap
+        this Device owns -- backs Texture.upload()/.download()'s default
+        implementations (see their docstrings for the measured win over a
+        standalone Device.buffer()/.empty() allocation: a Heap's backing
+        store is committed once, up front, so a fresh sub-allocation from
+        it skips almost all of the first-write page-fault cost a brand-new
+        standalone allocation pays).
+
+        Only ever holds ONE buffer's worth of space at a time: both
+        callers guarantee the returned Buffer is unreferenced by the time
+        they return (upload() blits synchronously then lets it go;
+        download() copies its contents out before returning, see its
+        docstring) -- so growing this heap to fit a bigger request is
+        always safe, no previously-handed-out sub-allocation can still be
+        alive when that happens. This is NOT the tool for holding several
+        independent results alive at once -- see Device.heap()'s own
+        docstring for that case, which this deliberately doesn't attempt
+        to solve (this heap's size tracks the single largest request ever
+        made, not how many were made).
+
+        Grows to fit the largest request seen so far and never shrinks on
+        its own -- see clear_staging_heap() to reclaim that memory
+        explicitly (e.g. after one unusually large texture, before doing
+        many more small ones)."""
+        nbytes = n_elements * np.dtype(dtype).itemsize
+        if self._staging_heap is None or self._staging_heap.size < nbytes:
+            self._staging_heap = self.heap(nbytes, storage=StorageMode.SHARED)
+        return self._staging_heap.empty(n_elements, dtype)
+
+    def clear_staging_heap(self) -> int:
+        """Frees _staging_buffer()'s internal Heap (used by
+        Texture.upload()/.download(), see its docstring) right now,
+        instead of it sitting at its high-water-mark size for the rest of
+        this Device's lifetime -- _staging_buffer() grows that Heap to fit
+        the largest request ever made and never shrinks it back down on
+        its own. The next .upload()/.download() call after this lazily
+        recreates it, sized for whatever it needs at that point -- so this
+        only matters if you've done one unusually large texture and want
+        that memory back before doing many more small ones. Returns the
+        number of bytes freed (0 if there was no staging Heap yet, i.e.
+        .upload()/.download() were never called, or this was already
+        called since the last one that was)."""
+        freed = self._staging_heap.size if self._staging_heap is not None else 0
+        self._staging_heap = None
+        return freed
+
+    def copy_buffer(self, src: Buffer, dst: Buffer, *, src_offset: int = 0, dst_offset: int = 0,
+                     size_bytes: int | None = None, wait: bool = True) -> None:
+        """Hardware-blit buffer-to-buffer copy (MTLBlitCommandEncoder::
+        copyFromBuffer) -- works for any combination of storage modes on
+        either side, including Private (which has no CPU-visible memory a
+        plain memcpy could reach). This is the mechanism Buffer.to_storage()
+        uses internally to materialize a Shared copy of a Private/Managed
+        Buffer; exposed here directly for any other buffer-to-buffer copy,
+        e.g. landing one Buffer's data at a specific offset into a larger
+        one via src_offset/dst_offset (mirroring Texture.upload_from_buffer()'s
+        offset param).
+
+        size_bytes defaults to everything from src_offset to the end of src
+        (src.size * src.dtype.itemsize - src_offset). dst must have room
+        for dst_offset + size_bytes -- out of range raises RuntimeError
+        (validated on the C++ side, see csrc/device.cpp) rather than
+        corrupting memory or crashing."""
+        if src._device is not dst._device:
+            raise ValueError(
+                "Buffers belong to different Device instances -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
+        if size_bytes is None:
+            size_bytes = src.size * src.dtype.itemsize - src_offset
+        self._dev.copy_buffer(src._buf, src_offset, dst._buf, dst_offset, size_bytes, wait)
+
     def compile(self, source: str, function_name: str) -> Pipeline:
         return Pipeline(self._dev.compile(source, function_name))
+
+    def heap(self, size_bytes: int, storage: StorageMode = StorageMode.SHARED) -> Heap:
+        """A memory pool (MTL::Heap) of at least size_bytes to sub-allocate
+        Buffers/Textures from via Heap.buffer()/.empty()/.empty_texture()
+        -- see Heap's class docstring for when this is worth it over the
+        standalone allocations Device.buffer()/.empty()/.empty_texture()
+        make. storage applies to every resource sub-allocated from the
+        returned Heap (Metal's own constraint, not chosen per-resource);
+        PRIVATE is the most common choice for a heap in practice (GPU-only
+        scratch memory reused across many allocate/free cycles), but this
+        defaults to SHARED for consistency with Device.buffer()/.empty()'s
+        own default -- pass storage=StorageMode.PRIVATE explicitly for the
+        common case."""
+        raw = self._dev.create_heap(size_bytes, int(StorageMode(storage)))
+        return Heap(raw, storage, self)
 
     def empty_texture(self, shape: tuple[int, ...], pixel_format: str, *,
                        readable: bool = True, writable: bool = True,
@@ -112,10 +222,10 @@ class Device:
         for a read-only 9-tap stencil kernel vs the same texture declared
         read+write). private=True additionally uses MTL::StorageModePrivate
         (GPU-only memory, freeing Metal to optimize further) instead of the
-        default StorageModeShared -- a private texture can't use
-        .upload()/.download() (Metal rejects replaceRegion/getBytes on
-        Private storage); use Texture.upload_from_buffer()/.to_buffer()
-        instead, which work regardless of storage mode."""
+        default StorageModeShared -- doesn't restrict .upload()/.download()
+        at all (both are blit-based, not replaceRegion/getBytes-based --
+        see their own docstrings), so a private texture works with every
+        method on this class the same as any other."""
         dims = len(shape)
         if dims not in (1, 2, 3):
             raise ValueError(
@@ -139,8 +249,8 @@ class Device:
         width  = shape[-1]
         height = shape[-2] if dims >= 2 else 1
         depth  = shape[-3] if dims >= 3 else 1
-        usage = (_TEXTURE_USAGE_SHADER_READ if readable else 0) | \
-                (_TEXTURE_USAGE_SHADER_WRITE if writable else 0)
+        usage = (TEXTURE_USAGE_SHADER_READ if readable else 0) | \
+                (TEXTURE_USAGE_SHADER_WRITE if writable else 0)
         raw = self._dev.create_texture(dims, info.mtl_value, width, height, depth,
                                         usage, private)
         return Texture(raw, dims, pixel_format, width, height, depth, self,
@@ -155,6 +265,47 @@ class Device:
         tex = self.empty_texture(spatial_shape, pixel_format)
         tex.upload(data)
         return tex
+
+    def blit_upload_texture(self, buf: Buffer, tex: Texture, *, offset: int = 0, wait: bool = True) -> None:
+        """Hardware-blit upload: copies buf's data into tex via
+        MTLBlitCommandEncoder, instead of Texture.upload()'s CPU-side
+        replaceRegion copy. This is the mechanism Texture.upload_from_buffer()
+        uses internally (see that method's docstring for the buf-layout/
+        offset contract, which this validates identically); exposed here
+        directly for callers who'd rather reach it as a Device method."""
+        if buf._device is not tex._device:
+            raise ValueError(
+                "Buffer and Texture belong to different Device instances -- Metal "
+                "does not allow referencing resources from different MTLDevice "
+                "objects in the same command buffer"
+            )
+        bytes_per_row, bytes_per_image = _texture_buffer_layout(tex, buf, offset)
+        self._dev.blit_upload_texture(buf._buf, offset, tex._tex, bytes_per_row, bytes_per_image, wait)
+
+    def blit_download_texture(self, tex: Texture, buf: Buffer, *, offset: int = 0, wait: bool = True) -> None:
+        """The read counterpart to blit_upload_texture(): hardware-blit copy
+        of tex's pixel data into buf, instead of Texture.download()'s
+        CPU-side getBytes() copy or buffer_from_texture()/.to_buffer()'s
+        compute-kernel readback. Three concrete advantages over the latter:
+        no compute-pipeline dispatch at all (pure copy-engine transfer);
+        works on a tex created with readable=False (buffer_from_texture()
+        requires MTLTextureUsageShaderRead and raises otherwise -- a blit
+        copy needs no shader access at all); and lands directly into an
+        existing buf you already own, at any offset, instead of always
+        allocating a fresh Buffer. Works for any pixel format (Unorm
+        included) and any combination of Shared/Private storage on either
+        side, same as copy_texture(). buf must have room for this texture's
+        tightly packed bytes starting at offset (same layout
+        Texture.upload_from_buffer() expects, same validation) -- see
+        Texture.download_to_buffer()."""
+        if tex._device is not buf._device:
+            raise ValueError(
+                "Texture and Buffer belong to different Device instances -- Metal "
+                "does not allow referencing resources from different MTLDevice "
+                "objects in the same command buffer"
+            )
+        bytes_per_row, bytes_per_image = _texture_buffer_layout(tex, buf, offset)
+        self._dev.blit_download_texture(tex._tex, buf._buf, offset, bytes_per_row, bytes_per_image, wait)
 
     def buffer_from_texture(self, tex: Texture) -> Buffer:
         """GPU-side texture readback: dispatches a small compute kernel that

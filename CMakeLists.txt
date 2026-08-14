@@ -25,6 +25,7 @@ nanobind_add_module(_mtlpy
     csrc/pipeline_cache.cpp
     csrc/buffer.cpp
     csrc/texture.cpp
+    csrc/heap.cpp
     csrc/sampler.cpp
     csrc/pipeline.cpp
     csrc/command_buffer.cpp

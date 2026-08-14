@@ -7,8 +7,11 @@ class Texture:
     """A Metal texture (1D/2D/3D). Unlike Buffer, a Texture's CPU-visible
     memory layout isn't guaranteed to be a tightly packed array (Metal may
     pad/tile rows internally), so there's no Buffer.contents equivalent --
-    .upload()/.download() are genuine copies via MTL::Texture's
-    replaceRegion/getBytes, not a live view over GPU memory."""
+    .upload()/.download() are both hardware blits through an internal
+    staging Buffer (see their own docstrings), not a live view over GPU
+    memory, and not the CPU-side replaceRegion/getBytes this project used
+    before measuring that a Heap-staged blit beats both. Works regardless
+    of storage mode, including private=True."""
 
     def __init__(self, _tex, dims: int, pixel_format: str,
                  width: int, height: int, depth: int, device,
@@ -96,26 +99,37 @@ class Texture:
             )
 
     def upload(self, data: np.ndarray) -> None:
-        self._check_data_shape(data)
-        arr = np.ascontiguousarray(data, dtype=self.dtype)
-        bytes_per_row, bytes_per_image = self._bytes_per_row_and_image()
-        self._tex.upload(arr, bytes_per_row, bytes_per_image)
+        """Writes data into an internal Shared staging Buffer (sub-allocated
+        from Device._staging_buffer()'s lazily-grown Heap -- see its
+        docstring), then blits it into this texture via
+        upload_from_buffer() -- instead of MTL::Texture::replaceRegion,
+        which this project used before measuring that a Heap-staged blit
+        beats it: a *fresh* standalone Buffer allocation pays a real
+        first-write cost that scales with size (uncommitted physical
+        pages faulting in), but this Device's staging Heap is committed
+        once up front, so a fresh sub-allocation from it skips almost all
+        of that cost -- measured ~1.9-3.4x faster than replaceRegion at
+        1080p/4K (loses only at very small textures, ~480p and below,
+        where replaceRegion's simplicity wins). Also means this now works
+        on a private=True texture (replaceRegion can't touch Private
+        storage at all; a blit doesn't care).
 
-    def upload_fast(self, data: np.ndarray, wait: bool = True) -> None:
-        """Convenience wrapper around upload_from_buffer(): stages data into
-        a fresh Buffer (a plain CPU memcpy into Buffer.contents, always
-        fast/zero-copy) and blit-uploads that into this texture, instead of
-        .upload()'s CPU-side replaceRegion copy -- measured up to ~9x faster
-        at 4K, and unlike .upload(), works on a private=True texture too.
-        Allocates a new staging Buffer on every call; for a hot loop
-        re-uploading to the same texture repeatedly, allocate your own
-        Buffer once and call upload_from_buffer() directly instead (same
-        allocate-once tradeoff as Buffer's own out-of-place convenience ops
-        -- see the README's "Reusing buffers in a hot loop")."""
+        The staging Buffer is only ever alive for the duration of one call
+        (freed the instant this returns, since nothing else references it
+        -- wait=True internally, so the blit has genuinely finished by
+        then), so this Device's staging Heap only ever needs to hold one
+        upload's worth of space, regardless of how many times you call
+        this. For a hot loop, reusing your own Buffer via
+        upload_from_buffer() directly is just as fast and skips the
+        internal staging-buffer indirection; see its docstring, and
+        Heap's class docstring, for when you'd want to manage this
+        yourself instead (holding several independent results alive at
+        once, which this method structurally can't help with)."""
         self._check_data_shape(data)
         arr = np.ascontiguousarray(data, dtype=self.dtype)
-        buf = self._device.buffer(arr)
-        self.upload_from_buffer(buf, wait=wait)
+        buf = self._device._staging_buffer(arr.size, self.dtype)
+        buf.contents[:] = arr.reshape(-1)
+        self.upload_from_buffer(buf)
 
     def upload_from_buffer(self, buf: "Buffer", offset: int = 0, wait: bool = True) -> None:
         """Hardware-blit upload: copies buf's data into this texture via
@@ -131,24 +145,20 @@ class Texture:
         write it there with a plain buf.contents[:] = ... first, an
         ordinary linear CPU memcpy. offset lets one larger buffer stage more
         than one texture's data (e.g. buf sized for two textures, the second
-        uploaded via offset=first_texture_nbytes)."""
-        self._check_same_device(buf, "Buffer")
-        expected_bytes = utils.shape_size(self.shape) * self.dtype.itemsize
-        if buf.dtype != self.dtype:
-            raise TypeError(
-                f"Buffer dtype {buf.dtype} doesn't match texture pixel_format "
-                f"{self.pixel_format!r}'s per-channel dtype {self.dtype}"
-            )
-        buf_bytes = buf.size * buf.dtype.itemsize
-        if offset + expected_bytes > buf_bytes:
-            raise ValueError(
-                f"Buffer has {buf_bytes} bytes, but offset={offset} plus this "
-                f"{self.shape} texture's {expected_bytes} bytes needs "
-                f"{offset + expected_bytes}"
-            )
-        bytes_per_row, bytes_per_image = self._bytes_per_row_and_image()
-        self._device._dev.blit_upload_texture(
-            buf._buf, offset, self._tex, bytes_per_row, bytes_per_image, wait)
+        uploaded via offset=first_texture_nbytes).
+
+        For maximum throughput: reuse a single Buffer across many calls if
+        you only need one result alive at a time (simplest, and just as
+        fast as any alternative -- write new data into it, call this,
+        repeat). If you need several independent Buffers alive
+        concurrently, allocate them from a Device.heap() sized for your
+        own concurrency instead of standalone Device.buffer()/.empty() --
+        see Heap's class docstring for the measured win (~1.9-3.4x at
+        1080p/4K) and why mtlpy doesn't do this for you automatically.
+
+        A thin wrapper around Device.blit_upload_texture(buf, self, ...) --
+        see that method if you'd rather call it directly on the Device."""
+        self._device.blit_upload_texture(buf, self, offset=offset, wait=wait)
 
     def optimize_for_gpu_access(self, wait: bool = True) -> None:
         """Encodes MTLBlitCommandEncoder.optimizeContentsForGPUAccess --
@@ -186,24 +196,63 @@ class Texture:
             )
         self._device._dev.copy_texture(self._tex, dst._tex, wait)
 
+    def download_to_buffer(self, buf: "Buffer", offset: int = 0, wait: bool = True) -> None:
+        """Hardware-blit download: the read counterpart to
+        upload_from_buffer() -- copies this texture's pixel data into buf
+        via MTLBlitCommandEncoder, instead of .download()'s CPU-side
+        getBytes() copy or to_buffer()'s compute-kernel readback. See
+        Device.blit_download_texture()'s docstring for the
+        concrete advantages over the latter (no compute dispatch, works
+        even with readable=False, lands in a buffer you already own).
+
+        buf must already have room for this texture's tightly packed bytes
+        (dtype matching this texture's per-channel dtype) starting at a
+        byte offset into buf -- same layout/offset contract as
+        upload_from_buffer(), reversed. A thin wrapper around
+        Device.blit_download_texture(self, buf, ...).
+
+        For maximum throughput, same guidance as upload_from_buffer(): a
+        single reused Buffer if you only need one result alive at a time,
+        or a Device.heap() sized for your own concurrency if you need
+        several independent results alive at once -- see Heap's class
+        docstring for the measured win (~1.5-2.4x) and why this isn't
+        automatic inside .download()."""
+        self._device.blit_download_texture(self, buf, offset=offset, wait=wait)
+
     def download(self) -> np.ndarray:
-        bytes_per_row, bytes_per_image = self._bytes_per_row_and_image()
-        nbytes = utils.shape_size(self.shape) * self.dtype.itemsize
-        raw = self._tex.download(nbytes, bytes_per_row, bytes_per_image)
-        return np.frombuffer(raw, dtype=self.dtype).reshape(self.shape)
+        """Hardware blit into an internal Shared staging Buffer
+        (sub-allocated from Device._staging_buffer()'s lazily-grown Heap --
+        see its docstring), then a plain CPU copy out of that Buffer's
+        .numpy() into an ordinary, independent array -- instead of
+        MTL::Texture::getBytes(), which this project used before measuring
+        that a Heap-staged blit (even with the extra copy-out) beats it:
+        getBytes() is a real CPU-bound copy that scales with image size,
+        while a blit's cost is mostly fixed per-call overhead that barely
+        grows with size -- measured ~1.2-1.5x faster at every size tested
+        (net of the copy-out; the copy costs real time, see this method's
+        history for numbers without it, but doesn't erase the win). Also
+        works regardless of this texture's storage mode, including
+        private=True -- getBytes() can't touch Private storage at all.
+
+        The copy-out (not a zero-copy view, unlike Buffer.numpy() and
+        unlike a naive "just return the staging Buffer's .numpy()") is
+        deliberate: it's what lets this Device's staging Heap stay small
+        and fixed regardless of how many .download() results you hold
+        onto simultaneously, since each call's staging Buffer is provably
+        unreferenced (and so immediately freed, and its heap space
+        reclaimed) the instant this returns -- a *reused* result-holding
+        Buffer would instead need capacity for however many results are
+        alive at once, which only the caller can size correctly (see
+        Heap's class docstring for that case, via download_to_buffer())."""
+        n = utils.shape_size(self.shape)
+        buf = self._device._staging_buffer(n, self.dtype)
+        self.download_to_buffer(buf)
+        return buf.numpy().reshape(self.shape).copy()
 
     def numpy(self) -> np.ndarray:
         """Alias for .download() -- see the class docstring for why this
         (unlike Buffer.numpy()) is always a real copy, not a view."""
         return self.download()
-
-    def download_fast(self) -> np.ndarray:
-        """Convenience wrapper around to_buffer(): reads this texture back
-        via a GPU-side compute-kernel copy into a Buffer, then that Buffer's
-        already-zero-copy .numpy(), instead of .download()'s CPU-side
-        getBytes() copy -- measured ~1.5-1.6x faster at 1080p/4K, and unlike
-        .download(), works on a private=True texture too."""
-        return self.to_buffer().numpy()
 
     def to_buffer(self) -> "Buffer":
         """GPU-side readback into a tightly packed Buffer (see

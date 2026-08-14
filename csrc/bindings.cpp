@@ -10,6 +10,7 @@
 #include "buffer.h"
 #include "command_buffer.h"
 #include "dlpack.h"
+#include "heap.h"
 #include "pipeline.h"
 #include "sampler.h"
 #include "texture.h"
@@ -56,6 +57,10 @@ NB_MODULE(_mtlpy, m) {
              // Same rationale as Pipeline::run's GIL release above -- this
              // blocks on waitUntilCompleted() when wait=True.
              nb::call_guard<nb::gil_scoped_release>())
+        .def("blit_download_texture", &Device::blit_download_texture,
+             nb::arg("tex"), nb::arg("buf"), nb::arg("offset"),
+             nb::arg("bytes_per_row"), nb::arg("bytes_per_image"), nb::arg("wait"),
+             nb::call_guard<nb::gil_scoped_release>())
         .def("optimize_texture_for_gpu_access", &Device::optimize_texture_for_gpu_access,
              nb::arg("tex"), nb::arg("wait"),
              nb::call_guard<nb::gil_scoped_release>())
@@ -72,7 +77,11 @@ NB_MODULE(_mtlpy, m) {
              nb::keep_alive<0, 1>())   // keep Device alive while Sampler is alive
         .def("create_command_buffer", &Device::create_command_buffer,
              nb::rv_policy::take_ownership,
-             nb::keep_alive<0, 1>());  // keep Device alive while CommandBuffer is alive
+             nb::keep_alive<0, 1>())   // keep Device alive while CommandBuffer is alive
+        .def("create_heap", &Device::create_heap,
+             nb::arg("size_bytes"), nb::arg("storage_mode"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>());  // keep Device alive while Heap is alive
 
     nb::class_<Buffer>(m, "Buffer")
         .def_prop_ro("data_ptr", [](const Buffer& b) {
@@ -162,6 +171,21 @@ NB_MODULE(_mtlpy, m) {
             }
             return nb::steal<nb::object>(capsule);
         }, nb::arg("dtype_code"), nb::arg("dtype_bits"), nb::arg("shape"));
+
+    nb::class_<Heap>(m, "Heap")
+        .def("new_buffer", &Heap::new_buffer,
+             nb::arg("size_bytes"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Heap alive while Buffer is alive
+        .def("new_texture", &Heap::new_texture,
+             nb::arg("dims"), nb::arg("pixel_format"),
+             nb::arg("width"), nb::arg("height"), nb::arg("depth"),
+             nb::arg("usage"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Heap alive while Texture is alive
+        .def_prop_ro("size", &Heap::size)
+        .def_prop_ro("used_size", &Heap::used_size)
+        .def_prop_ro("storage_mode", &Heap::storage_mode);
 
     nb::class_<Texture>(m, "Texture")
         .def("upload", [](Texture& t, nb::object data, size_t bytes_per_row, size_t bytes_per_image) {

@@ -4,8 +4,6 @@
 
 namespace mtlpy {
 
-namespace {
-
 MTL::TextureType texture_type_for(uint32_t dims) {
     switch (dims) {
         case 1: return MTL::TextureType1D;
@@ -15,6 +13,8 @@ MTL::TextureType texture_type_for(uint32_t dims) {
             throw std::runtime_error("Texture dims must be 1, 2, or 3 (got " + std::to_string(dims) + ")");
     }
 }
+
+namespace {
 
 MTL::Region region_for(uint32_t dims, uint32_t width, uint32_t height, uint32_t depth) {
     switch (dims) {
@@ -52,6 +52,11 @@ Texture::Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
 
     if (!tex_)
         throw std::runtime_error("Failed to allocate Metal texture");
+}
+
+Texture::Texture(MTL::Texture* tex, uint32_t dims, bool is_private)
+    : tex_(tex), dims_(dims), is_private_(is_private)
+{
 }
 
 Texture::~Texture() {
