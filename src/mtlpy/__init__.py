@@ -6,6 +6,7 @@ if sys.platform != "darwin":
 
 from .device import Device, list_devices
 from .buffer import Buffer
+from .heap import Heap
 from .texture import Sampler, Texture
 from .utils import StorageMode
 from . import operators
@@ -14,4 +15,4 @@ from . import operators
 # generates from pyproject.toml's [project].version at build time) instead
 # of a hardcoded string.
 __version__ = _version("mtlpy")
-__all__ = ["Device", "Buffer", "Texture", "Sampler", "StorageMode", "operators", "list_devices"]
+__all__ = ["Device", "Buffer", "Heap", "Texture", "Sampler", "StorageMode", "operators", "list_devices"]

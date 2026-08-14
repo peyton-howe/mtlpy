@@ -378,29 +378,58 @@ A few things that differ from `Buffer`:
 
 ### Moving data in and out of a Texture
 
-`device.texture(data, pixel_format)` and `.upload()`/`.download()` (above)
-are the simple default path -- always available, but CPU-side copies
-(`replaceRegion`/`getBytes`) that only work on the default `Shared` storage
-mode. There's a faster, GPU-side path for every CPU/Buffer/Texture
-direction, each suited to a different data source and each working
-regardless of storage mode (including `private=True`, see below) -- see
-`benchmarks/README.md` for the measurements behind these:
+`device.texture(data, pixel_format)`, `.upload()`, and `.download()` are the
+simple default path -- always available, and both GPU-side: each stages
+through an internal `Buffer` sub-allocated from a `Heap` this `Device` owns
+and grows automatically (`Device._staging_buffer()`), then blits, instead of
+`MTL::Texture`'s CPU-side `replaceRegion`/`getBytes()` this project used
+before measuring the difference (see `benchmarks/blit_bench.py`):
+
+- A *fresh* standalone `Buffer` allocation (`Device.buffer()`/`.empty()`)
+  pays a real first-write cost that scales with size -- a brand-new
+  `Buffer`'s memory isn't physically committed until the CPU writes it, and
+  that first write faults in pages the OS hasn't backed yet. A `Heap`'s
+  backing store is committed once, up front, so a *fresh* sub-allocation
+  from it skips almost all of that cost.
+- Net effect: `.upload()`/`.download()` measured ~2-4x faster than the old
+  CPU-side methods at 1080p/4K. They lose only at small sizes (~480p and
+  below, where a blit's fixed per-call overhead -- command buffer encode/
+  submit/wait -- isn't worth paying yet); `replaceRegion`/`getBytes()`
+  aren't exposed as separate methods, since at that point the difference is
+  a fraction of a millisecond either way.
+- Also means both now work on a `private=True` texture -- `replaceRegion`/
+  `getBytes()` can't touch Private storage at all, but a blit doesn't care.
+- The internal staging `Buffer` never sticks around: `.upload()`'s is freed
+  the instant the (synchronous) blit completes, and `.download()`'s
+  contents are copied out into an ordinary, independent array before
+  returning (not a zero-copy view -- see its docstring for why: it's what
+  lets the internal `Heap` stay small and fixed regardless of how many
+  `.download()` results you hold onto, rather than needing capacity for
+  all of them). That `Heap` grows to fit the largest single texture you've
+  ever processed and never shrinks back down on its own --
+  `Device.clear_staging_heap()` reclaims it explicitly if you've done one
+  unusually large texture and want that memory back.
+
+There's also a lower-level GPU-side path for explicit control, for when you
+need more than what the auto-managed internal `Heap` gives you -- namely,
+reusing your *own* `Buffer` across many calls (skips the internal
+staging-buffer indirection entirely), or holding several independent
+results alive at once (which the internal `Heap` structurally can't do,
+since it only ever holds one buffer's worth of space -- see "Maximum
+throughput" below):
 
 | Direction | Method | Mechanism | Notes |
 |---|---|---|---|
-| CPU -> Texture | `tex.upload(data)` | CPU `replaceRegion` | Simple default; `Shared` storage only |
-| CPU -> Texture | `tex.upload_fast(data)` | CPU->`Buffer` memcpy + GPU blit | Up to ~9x faster at 4K; works on `private=True` |
-| `Buffer` -> Texture | `tex.upload_from_buffer(buf)` | GPU blit | Same mechanism `upload_fast` uses, without the implicit staging `Buffer` -- use this directly if you already have a `Buffer` (e.g. reusing one across a hot loop instead of allocating fresh each call) |
-| Texture -> CPU | `tex.download()` / `.numpy()` / `np.asarray(tex)` | CPU `getBytes` | Simple default; `Shared` storage only |
-| Texture -> CPU | `tex.download_fast()` | GPU compute kernel + `Buffer`->CPU (zero-copy) | ~1.5-1.6x faster at 1080p/4K; works on `private=True`; raises `NotImplementedError` on `Unorm` formats |
-| Texture -> `Buffer` | `tex.to_buffer()` | GPU compute kernel | What `download_fast` calls before `.numpy()` -- use this directly if you want the `Buffer`, not a numpy array (e.g. feeding it straight into another kernel) |
+| `Buffer` -> Texture | `tex.upload_from_buffer(buf)` / `device.blit_upload_texture(buf, tex)` | GPU blit | What `.upload()` uses internally, exposed directly so you can supply (and reuse) your own `Buffer` instead of the auto-managed internal one |
+| Texture -> `Buffer` | `tex.download_to_buffer(buf)` / `device.blit_download_texture(tex, buf)` | GPU blit | What `.download()` uses internally, exposed directly so you can supply (and reuse) your own `Buffer`. Works on any pixel format (`Unorm` included) and storage mode, including a texture created with `readable=False` (`to_buffer()` below requires `readable=True`) |
+| Texture -> `Buffer` | `tex.to_buffer()` | GPU compute kernel | Requires `readable=True` (the copy kernel does `texture.read()`); use this if you want a compute-kernel-based readback specifically, otherwise `download_to_buffer()` above is generally faster (no pipeline dispatch) |
 | Texture -> Texture | `src.copy_to(dst)` | GPU blit | Works on any pixel format (including `Unorm`) and any `Shared`/`Private` combination -- e.g. copying a `Shared` texture you populated with `.upload()` into a `Private` one before a hot compute loop |
 
 `empty_texture(..., readable=, writable=, private=)` controls usage flags
 and storage mode at creation. `private=True` (`MTLStorageModePrivate`,
-GPU-only memory) requires the GPU-side methods above -- `.upload()`/
-`.download()` raise a clear error on a private texture, since Metal itself
-rejects `replaceRegion`/`getBytes` on `Private` storage.
+GPU-only memory) doesn't restrict `.upload()`/`.download()` or any
+`Buffer`-mediated method -- all are blit-based, and a blit doesn't care
+about storage mode.
 
 ## Reusing buffers in a hot loop
 
@@ -429,6 +458,43 @@ output `Buffer` internally, which is fine for one-off use but wasteful in a
 tight loop. The in-place operators (`a += b`, `a *= 2.0`, ...) do reuse `a`'s
 own buffer with no extra allocation, if that fits your loop. See
 `examples/reuse_buffers.py`.
+
+## Maximum throughput with several buffers alive at once: `Device.heap()`
+
+`.upload()`/`.download()` already sub-allocate from an internal `Heap`
+automatically (see above) — but that internal `Heap` only ever holds *one*
+buffer's worth of space at a time, because both methods guarantee their
+staging `Buffer` is unreferenced by the time they return. That's exactly
+what makes growing it safe without bound-checking against anything still
+in use, but it also means it can't help with holding *several* independent
+results alive concurrently (e.g. accumulating a batch of
+`Texture.download_to_buffer()` results before processing them together,
+rather than consuming and discarding each one before the next call) — for
+that, build and manage your own `Heap`, sized for your own concurrency:
+
+```python
+# Accumulate several downloads before processing them together, without
+# paying fresh-standalone-allocation cost for each one.
+heap = device.heap(4 * 1024 * 1024, storage=mtlpy.StorageMode.SHARED)
+
+results = []
+for tex in textures_to_read_back:
+    buf = heap.empty(tex.width * tex.height, np.float32)  # fresh, cheap
+    tex.download_to_buffer(buf)
+    results.append(buf.numpy())  # each is independent -- safe to hold all of them
+
+process_batch(results)
+```
+
+Size the `Heap` for the number of buffers you actually need alive at once —
+a `Heap`'s capacity is fixed at creation, and only you know your own
+concurrency bound. Guess too small and holding "too many" results alive
+raises `RuntimeError: insufficient free space` (confirmed: a `Heap` sized
+for 20 buffers fails cleanly, not a crash, on the 21st one held alive
+simultaneously) — this is exactly why the internal staging `Heap` behind
+`.upload()`/`.download()` doesn't try to solve this case for you; it would
+have to guess a limit, and guess wrong for someone. See `Heap`'s class
+docstring (`src/mtlpy/heap.py`) for the full measurement and reasoning.
 
 ## Batching dispatches
 

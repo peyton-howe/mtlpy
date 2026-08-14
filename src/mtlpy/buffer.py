@@ -27,20 +27,18 @@ class Buffer:
 
     def to_storage(self, storage: StorageMode) -> Buffer:
         """A new Buffer holding a copy of this Buffer's data in a different
-        storage mode, via a GPU-side blit copy (MTLBlitCommandEncoder,
-        wrapped by the internal Device::copy_buffer() -- there's no public
-        Device.copy_buffer() Python method, this is the only way to reach
-        it) -- unlike a CPU memcpy, this works no matter which storage
-        mode(s) are involved (including Private, which has no CPU-visible
-        memory at all). Returns self unchanged (no copy) if already in
-        storage."""
+        storage mode, via a GPU-side blit copy (Device.copy_buffer()) --
+        unlike a CPU memcpy, this works no matter which storage mode(s) are
+        involved (including Private, which has no CPU-visible memory at
+        all). Returns self unchanged (no copy) if already in storage."""
         storage = StorageMode(storage)
         if storage == self.storage:
             return self
         nbytes = self.size * self.dtype.itemsize
         raw    = self._device._dev.create_buffer(nbytes, int(storage))
-        self._device._dev.copy_buffer(self._buf, 0, raw, 0, nbytes, True)
-        return Buffer(raw, self.dtype, self.shape, self._device)
+        dst    = Buffer(raw, self.dtype, self.shape, self._device)
+        self._device.copy_buffer(self, dst, size_bytes=nbytes)
+        return dst
 
     @property
     def contents(self) -> np.ndarray:

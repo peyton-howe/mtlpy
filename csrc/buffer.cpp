@@ -18,6 +18,11 @@ Buffer::Buffer(MTL::Device* device, size_t size_bytes, uint32_t storage_mode)
         throw std::runtime_error("Failed to allocate Metal buffer");
 }
 
+Buffer::Buffer(MTL::Buffer* buf, size_t size_bytes, uint32_t storage_mode)
+    : buf_(buf), size_bytes_(size_bytes), storage_mode_(storage_mode)
+{
+}
+
 Buffer::~Buffer() {
     PoolGuard guard;
     buf_->release();

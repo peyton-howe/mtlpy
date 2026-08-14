@@ -3,6 +3,13 @@ from typing import NamedTuple
 import numpy as np
 
 
+# MTL::TextureUsageShaderRead/ShaderWrite raw values (Metal/MTLTexture.hpp) --
+# shared by Device.empty_texture() and Heap.empty_texture()'s readable/
+# writable params.
+TEXTURE_USAGE_SHADER_READ  = 1
+TEXTURE_USAGE_SHADER_WRITE = 1 << 1
+
+
 class StorageMode(enum.IntEnum):
     """Metal buffer storage mode -- raw MTL::StorageMode values (metal-cpp's
     Metal/MTLResource.hpp), passed straight through to Device.create_buffer()

@@ -5,6 +5,12 @@
 
 namespace mtlpy {
 
+// Shared with Heap::new_texture() (heap.cpp), which builds its own
+// MTL::TextureDescriptor the same way this class's constructor does but
+// allocates via MTL::Heap::newTexture() instead of MTL::Device::newTexture().
+// Throws on an invalid dims (1/2/3 only -- no arrays or multisampling).
+MTL::TextureType texture_type_for(uint32_t dims);
+
 class Texture {
 public:
     // dims selects MTL::TextureType1D/2D/3D (1, 2, or 3 -- no arrays or
@@ -27,6 +33,14 @@ public:
     Texture(MTL::Device* device, uint32_t dims, uint32_t pixel_format,
             uint32_t width, uint32_t height, uint32_t depth,
             uint32_t usage, bool private_storage);
+
+    // Wraps an already-allocated MTL::Texture* (e.g. from MTL::Heap::newTexture,
+    // see Heap::new_texture() in heap.cpp) -- takes ownership. is_private
+    // mirrors private_storage above: true for any non-Shared heap storage
+    // (Managed included -- this class has no separate Managed CPU-access
+    // path, same as Buffer treats Managed like Private for that purpose).
+    Texture(MTL::Texture* tex, uint32_t dims, bool is_private);
+
     ~Texture();
 
     // Metal textures don't expose a directly-addressable CPU pointer the

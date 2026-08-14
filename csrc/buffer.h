@@ -13,6 +13,15 @@ public:
     // Memoryless (3) isn't accepted: Metal restricts it to render-target
     // textures, not buffers.
     Buffer(MTL::Device* device, size_t size_bytes, uint32_t storage_mode);
+
+    // Wraps an already-allocated MTL::Buffer* (e.g. from MTL::Heap::newBuffer,
+    // see Heap::new_buffer() in heap.cpp) -- takes ownership (the destructor
+    // below releases it same as the device-allocating constructor above).
+    // Callers are responsible for buf being non-null and storage_mode
+    // matching its actual storage (Heap::new_buffer() derives both
+    // correctly from the heap itself).
+    Buffer(MTL::Buffer* buf, size_t size_bytes, uint32_t storage_mode);
+
     ~Buffer();
 
     // Only valid when storage_mode() == MTL::StorageModeShared -- throws

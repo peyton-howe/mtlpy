@@ -12,6 +12,7 @@ class PipelineCache;
 class Texture;
 class Sampler;
 class CommandBuffer;
+class Heap;
 
 class Device {
 public:
@@ -23,6 +24,10 @@ public:
 
     // storage_mode -- see Buffer's constructor in buffer.h.
     Buffer*   create_buffer(size_t size_bytes, uint32_t storage_mode);
+
+    // storage_mode -- see Heap's constructor in heap.h.
+    Heap*     create_heap(size_t size_bytes, uint32_t storage_mode);
+
     Pipeline* compile(const std::string& source, const std::string& function_name);
 
     // dims is 1/2/3 (see Texture); pixel_format is a raw MTL::PixelFormat
@@ -42,6 +47,19 @@ public:
     // convention as Texture::upload's bytes_per_row).
     void blit_upload_texture(Buffer* buf, size_t offset, Texture* tex,
                               size_t bytes_per_row, size_t bytes_per_image, bool wait);
+
+    // The read counterpart to blit_upload_texture(): hardware-blit copy of
+    // tex's pixel data into buf (MTLBlitCommandEncoder::copyFromTexture,
+    // texture-to-buffer overload) starting at offset, instead of
+    // Texture::download()'s CPU-side getBytes(). Moves raw bytes with no
+    // shader/format-conversion pass, so -- like copy_texture() below --
+    // this works for any pixel format (Unorm included, unlike
+    // buffer_from_texture()'s compute-kernel readback) and any combination
+    // of Shared/Private storage on either side. bytes_per_row/
+    // bytes_per_image describe buf's layout starting at offset, same
+    // convention as blit_upload_texture's.
+    void blit_download_texture(Texture* tex, Buffer* buf, size_t offset,
+                                size_t bytes_per_row, size_t bytes_per_image, bool wait);
 
     // Encodes MTLBlitCommandEncoder::optimizeContentsForGPUAccess -- lets
     // Metal repack a texture's contents into its preferred GPU-side layout
