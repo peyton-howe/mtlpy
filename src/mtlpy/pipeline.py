@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .sync import Event, Fence
+
 # Sentinel distinguishing "wait not passed" from "wait=True passed explicitly"
 # -- needed because True is also wait's own default, so a plain `wait: bool =
 # True` parameter can't tell the two apart. See Pipeline.run's cb/wait check.
@@ -21,7 +23,9 @@ class Pipeline:
 
     def run(self, buffers: list, grid, wait=_WAIT_UNSET,
             textures: list | None = None, samplers: list | None = None,
-            cb: "CommandBuffer | None" = None, threadgroup=None) -> tuple[float, float]:
+            cb: "CommandBuffer | None" = None, threadgroup=None,
+            wait_fences: list[Fence] | None = None,
+            signal_fences: list[Fence] | None = None) -> tuple[float, float]:
         """Returns (gpu_start, gpu_end) in seconds -- pure device-side
         execution time for this dispatch (MTLCommandBuffer's GPUStartTime/
         GPUEndTime), excluding CPU-side encoding/dispatch overhead. Only
@@ -49,7 +53,15 @@ class Pipeline:
         constraints or this raises: total threads (w*h*d) <=
         max_threads_per_threadgroup, and a multiple of
         thread_execution_width. Leave as None (the default) to keep the
-        existing auto-computed size. Applies whether or not cb is given."""
+        existing auto-computed size. Applies whether or not cb is given.
+
+        wait_fences/signal_fences (both default None, treated as empty)
+        wait-for/update the given Fences immediately before/after this
+        dispatch's work inside its compute encoder -- see Fence's class
+        docstring for what this does and doesn't guarantee (in particular:
+        it only orders dispatches on the same MTL::CommandQueue -- see
+        Device.event()/.shared_event() for ordering across Queues). Applies
+        whether or not cb is given."""
         if cb is not None and wait is not _WAIT_UNSET:
             raise ValueError(
                 "wait has no effect when cb is given -- control waiting via "
@@ -67,6 +79,8 @@ class Pipeline:
             wait,
             cb._cb if cb is not None else None,
             tg,
+            [f._fence for f in (wait_fences or [])],
+            [f._fence for f in (signal_fences or [])],
         )
 
     @property
@@ -99,7 +113,12 @@ class CommandBuffer:
     Pipeline.run(cb=cb) call raises (e.g. an unbound-argument error), this
     CommandBuffer is marked failed at the C++ layer, and commit() -- however
     you reach it -- then raises too instead of silently submitting whatever
-    was successfully encoded before the failure."""
+    was successfully encoded before the failure.
+
+    wait_for_event()/signal_event() splice a GPU-side wait/signal into this
+    batch's command stream, ordering it against other CommandBuffers --
+    including ones on a different Device.queue() -- see Event's class
+    docstring."""
 
     def __init__(self, _cb):
         self._cb        = _cb    # _mtlpy.CommandBuffer
@@ -111,6 +130,21 @@ class CommandBuffer:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         if exc_type is None and not self._committed:
             self.commit()
+
+    def wait_for_event(self, event: Event, value: int) -> None:
+        """Splices a command-buffer-level wait into this batch: nothing
+        encoded into this CommandBuffer *after* this call (via
+        Pipeline.run(..., cb=cb), or a later wait_for_event()/signal_event())
+        starts on the GPU until event reaches value -- work encoded *before*
+        this call is unaffected. See Event's class docstring for the
+        producer/consumer pattern this is half of."""
+        self._cb.encode_wait_for_event(event._event, value)
+
+    def signal_event(self, event: Event, value: int) -> None:
+        """The producer side of wait_for_event(): signals event to value
+        once every dispatch encoded into this CommandBuffer *before* this
+        call has completed on the GPU."""
+        self._cb.encode_signal_event(event._event, value)
 
     def commit(self, wait: bool = True) -> tuple[float, float]:
         """Ends encoding and submits every dispatch encoded into this

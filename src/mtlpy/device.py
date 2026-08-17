@@ -3,6 +3,7 @@ import numpy as np
 from .buffer import Buffer
 from .heap import Heap
 from .pipeline import CommandBuffer, Pipeline
+from .sync import Event, Fence, Queue, SharedEvent, SharedEventHandle
 from .texture import Sampler, Texture
 from . import utils, shader
 from .utils import StorageMode, TEXTURE_USAGE_SHADER_READ, TEXTURE_USAGE_SHADER_WRITE
@@ -357,15 +358,59 @@ class Device:
         raw = self._dev.create_sampler(linear, repeat)
         return Sampler(raw, linear, repeat, self)
 
-    def command_buffer(self) -> CommandBuffer:
+    def command_buffer(self, queue: Queue | None = None) -> CommandBuffer:
         """A batch of Pipeline.run() dispatches that share one MTLCommandBuffer
         submission -- see CommandBuffer's docstring for the context-manager
         usage. Use this instead of separate Pipeline.run() calls when you
         have multiple dispatches that always run together (e.g. a multi-pass
         kernel), to pay one command-buffer-submit + wait instead of one per
-        dispatch."""
-        raw = self._dev.create_command_buffer()
+        dispatch.
+
+        queue (default None) submits this batch on a secondary Queue (see
+        Device.queue()) instead of this Device's own default queue -- the
+        mechanism for running independent streams of work on more than one
+        MTL::CommandQueue, synchronized only where a CommandBuffer.wait_for_event()/
+        .signal_event() call says so."""
+        if queue is not None and queue._device is not self:
+            raise ValueError(
+                "Queue belongs to a different Device instance -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
+        raw = self._dev.create_command_buffer(queue._queue if queue is not None else None)
         return CommandBuffer(raw)
+
+    def queue(self) -> Queue:
+        """A second MTL::CommandQueue beyond this Device's own default one --
+        see Queue's class docstring for what it's for and its one
+        restriction (only reachable via the batched Device.command_buffer(queue=...)
+        path, not a Pipeline's self-contained dispatch)."""
+        return Queue(self._dev.create_queue(), self)
+
+    def event(self) -> Event:
+        """A GPU-side-only synchronization primitive for ordering work
+        across separate CommandBuffers/Queues -- see Event's class
+        docstring for the producer/consumer pattern. Cheaper than
+        shared_event() when nothing needs to read/wait on it from the CPU."""
+        return Event(self._dev.create_event(), self)
+
+    def shared_event(self) -> SharedEvent:
+        """Like event(), but adds CPU-visible signal()/.signaled_value/
+        wait() for CPU<->GPU handoff, and export_handle() for cross-process
+        use -- see SharedEvent's class docstring."""
+        return SharedEvent(self._dev.create_shared_event(), self)
+
+    def import_shared_event(self, handle: SharedEventHandle) -> SharedEvent:
+        """The receiving end of SharedEvent.export_handle(): reconstructs
+        the same underlying MTL::SharedEvent from a handle another process
+        exported (see SharedEventHandle's docstring for how the handle
+        itself needs to reach this process)."""
+        return SharedEvent(self._dev.create_shared_event_from_handle(handle._handle), self)
+
+    def fence(self) -> Fence:
+        """A same-queue producer/consumer ordering primitive for
+        Pipeline.run's wait_fences/signal_fences -- see Fence's class
+        docstring for what it does and doesn't guarantee."""
+        return Fence(self._dev.create_fence(), self)
 
     def _binary_op(self, name: str, shader_fn, a: Buffer, b: Buffer, out: Buffer | None = None) -> Buffer:
         if a._device is not b._device:

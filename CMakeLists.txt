@@ -29,6 +29,9 @@ nanobind_add_module(_mtlpy
     csrc/sampler.cpp
     csrc/pipeline.cpp
     csrc/command_buffer.cpp
+    csrc/queue.cpp
+    csrc/event.cpp
+    csrc/fence.cpp
     csrc/bindings.cpp
 )
 

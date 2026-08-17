@@ -54,6 +54,9 @@ csrc/                C++ extension (nanobind + metal-cpp)
                           one MTL::CommandBuffer submission
   pipeline_cache.{h,cpp}  Compiles-once cache, keyed on (source, function name),
                           backed by an on-disk MTL::BinaryArchive
+  queue.{h,cpp}        A secondary MTL::CommandQueue (Device.queue())
+  event.{h,cpp}        MTL::Event/MTL::SharedEvent wrappers (Device.event()/.shared_event())
+  fence.{h,cpp}        MTL::Fence wrapper (Device.fence())
   metal_impl.mm        Single Obj-C++ translation unit providing the
                         NS::/CA::/MTL:: private implementations
   bindings.cpp         nanobind module definition (`_mtlpy`)
@@ -62,6 +65,7 @@ src/mtlpy/          Python package (src layout, for PyPI)
   buffer.py             Buffer: NumPy-backed contents, arithmetic/comparison/in-place operators
   texture.py             Texture, Sampler: wrap _mtlpy.Texture/_mtlpy.Sampler
   pipeline.py           Pipeline, CommandBuffer: thin wrappers over _mtlpy.Pipeline/CommandBuffer
+  sync.py               Queue, Event, SharedEvent, SharedEventHandle, Fence: advanced synchronization
   operators.py          sqrt/cos/sin/tan/exp/log, sum/max/min/mean reductions
   shader.py             Generates Metal Shading Language source per dtype/texture type
   utils.py              NumPy dtype <-> Metal type/pixel format mapping
@@ -70,8 +74,11 @@ benchmarks/          Standalone performance baseline scripts
 examples/            Runnable usage examples
 ```
 
-Each `Device` in Python owns exactly one `MTL::Device`, one `MTL::CommandQueue`,
-and one `PipelineCache`. Buffers default to `MTL::ResourceStorageModeShared`
+Each `Device` in Python owns exactly one `MTL::Device`, one default
+`MTL::CommandQueue`, and one `PipelineCache` -- `Device.queue()` creates
+additional `MTL::CommandQueue`s on demand for concurrent, independently
+scheduled work (see [Advanced synchronization](#advanced-synchronization)).
+Buffers default to `MTL::ResourceStorageModeShared`
 (`Device.buffer()`/`.empty()`'s `storage=` parameter, `mtlpy.StorageMode`,
 picks `MANAGED`/`PRIVATE` instead), so on Apple Silicon's unified memory
 there's no copy between CPU and GPU views of the same allocation —
@@ -142,6 +149,13 @@ into it raises `ValueError` rather than silently doing nothing); see
 - **Batched dispatches**: `Device.command_buffer()` batches multiple
   `Pipeline.run()` calls into one `MTLCommandBuffer` submission instead of
   one per dispatch -- see [Batching dispatches](#batching-dispatches) below.
+- **Advanced synchronization**: `Device.queue()` for a second (or third, ...)
+  independently-scheduled `MTL::CommandQueue`; `Device.event()`/`.shared_event()`
+  to order `CommandBuffer`s against each other -- including across queues,
+  and (via `SharedEvent.export_handle()`) across processes; `Device.fence()`
+  for same-queue producer/consumer ordering between `Pipeline.run()`
+  dispatches -- see [Advanced synchronization](#advanced-synchronization)
+  below.
 - **Multi-GPU support**: `mtlpy.list_devices()` lists every Metal-capable GPU
   on the machine; `mtlpy.Device(index=...)` selects one (the default targets
   the system default GPU).
@@ -553,6 +567,99 @@ dispatches, but they're not interchangeable —
 little CPU work in between (its original motivating case: a multi-pass
 kernel). A `wait=False` chain remains the right tool when there's real work
 to overlap with GPU execution, or the sequence is decided dynamically.
+
+## Advanced synchronization
+
+Everything above assumes one `Device`, one queue: `wait=False`/`CommandBuffer`
+batching both rely on Metal's guarantee that command buffers on the *same*
+`MTL::CommandQueue` retire in commit order. That guarantee doesn't extend
+across *different* queues, and sometimes you want more than one -- e.g. two
+independent kernels that don't depend on each other, scheduled concurrently
+instead of forced through one serial stream. `Device.queue()`, `Device.event()`/
+`.shared_event()`, and `Device.fence()` are the tools for that: a second
+`MTL::CommandQueue`, and the two Metal primitives for ordering GPU work that
+isn't already implied by "same queue, commit order."
+
+### A second queue: `Device.queue()`
+
+```python
+q = device.queue()
+with device.command_buffer(queue=q) as cb:
+    pipeline.run(bufs, grid, cb=cb)
+```
+
+Only reachable via the *batched* dispatch path (`Device.command_buffer(queue=q)`
++ `Pipeline.run(..., cb=cb)`) -- a `Pipeline`'s self-contained dispatch
+(`pipeline.run(bufs, grid)`, no `cb=`) always targets the `Device`'s own
+default queue, regardless of what `Queue`s exist. On its own, a second queue
+just gives you a second independently-scheduled submission stream; the
+primitives below are what let you order specific pieces of work across it
+when you actually need to.
+
+### `Event` / `SharedEvent`: ordering across queues (and processes)
+
+`Device.event()` returns an `MTL::Event` wrapper: a GPU-side-only signal/wait
+that `CommandBuffer.signal_event()`/`.wait_for_event()` splice into a batch's
+command stream. A `CommandBuffer` on one queue signals an event once its
+encoded work completes; a `CommandBuffer` on another queue waits for it
+before starting its own -- the one ordering guarantee two independent queues
+don't give you for free:
+
+```python
+q1, q2 = device.queue(), device.queue()
+event = device.event()
+
+with device.command_buffer(queue=q1) as cb1:
+    producer.run(bufs, grid, cb=cb1)
+    cb1.signal_event(event, 1)
+
+with device.command_buffer(queue=q2) as cb2:
+    cb2.wait_for_event(event, 1)   # blocks q2's dispatch until q1's completes
+    consumer.run(bufs, grid, cb=cb2)
+```
+
+`Device.shared_event()` returns an `MTL::SharedEvent` wrapper -- same
+GPU-side `signal_event()`/`wait_for_event()`, plus a CPU-visible `uint64`
+"signaled value" you can read/set/block on directly from Python:
+`SharedEvent.signal(value)`, `.signaled_value`, and `.wait(value, timeout_ms=5000)`
+(blocks the calling thread, releasing the GIL, until `signaled_value` reaches
+at least `value`, or the timeout elapses -- returns `False` on timeout). That
+makes it the tool for CPU<->GPU handoff in either direction: the GPU signals
+something the CPU is waiting on, or the CPU signals something a
+`wait_for_event()`-blocked dispatch is waiting on. `SharedEvent` is strictly
+more capable than `Event` (superset of what it can do) but costs more to
+create/signal -- use `Event` when nothing needs CPU visibility.
+
+`SharedEvent.export_handle()` returns a `SharedEventHandle` another *process*
+can import via `Device.import_shared_event(handle)` to synchronize with the
+same underlying event -- e.g. coordinating with another framework or a
+separate process also using Metal. mtlpy only provides the create/export/
+import primitives; actually transporting the handle to the other process
+(over an XPC connection, which knows how to encode `MTLSharedEventHandle`
+natively since it conforms to `NSSecureCoding`) is up to the caller.
+
+### `Fence`: same-queue producer/consumer ordering
+
+`Device.fence()` returns an `MTL::Fence` wrapper, passed to `Pipeline.run()`
+as `wait_fences`/`signal_fences`:
+
+```python
+fence = device.fence()
+producer.run(bufs, grid, wait=False, signal_fences=[fence])
+consumer.run(bufs2, grid, wait=True,  wait_fences=[fence])
+```
+
+This orders two dispatches on the *same* `MTL::CommandQueue` (whether
+batched into one `CommandBuffer` or each self-contained) without an explicit
+`wait=True`/commit-order dependency between them. In practice this is rarely
+load-bearing in mtlpy specifically: every `Buffer`/`Texture` here uses
+Metal's automatic resource-hazard tracking (none are created with
+`hazardTrackingModeUntracked`), which already orders a dispatch that reads a
+buffer after an earlier one on the same queue that wrote it, with no fence
+needed. `Fence` is exposed as a lower-level, explicit tool for orderings
+that aren't implied by resource usage alone. For ordering across
+*different* queues, use `Event`/`SharedEvent` instead -- `Fence`'s guarantee
+is scoped to a single queue.
 
 ## Testing
 

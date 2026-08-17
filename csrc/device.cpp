@@ -1,11 +1,14 @@
 #include "device.h"
 #include "buffer.h"
 #include "command_buffer.h"
+#include "event.h"
+#include "fence.h"
 #include "heap.h"
 #include "metal_error.h"
 #include "pipeline.h"
 #include "pipeline_cache.h"
 #include "pool_guard.h"
+#include "queue.h"
 #include "sampler.h"
 #include "texture.h"
 #include <functional>
@@ -165,8 +168,31 @@ Sampler* Device::create_sampler(bool linear, bool repeat) {
     return new Sampler(device_, linear, repeat);
 }
 
-CommandBuffer* Device::create_command_buffer() {
-    return new CommandBuffer(queue_);
+CommandBuffer* Device::create_command_buffer(Queue* queue) {
+    return new CommandBuffer(queue ? queue->mtl() : queue_);
+}
+
+Queue* Device::create_queue() {
+    auto* q = device_->newCommandQueue();
+    if (!q)
+        throw std::runtime_error("Failed to create Metal command queue");
+    return new Queue(q);
+}
+
+Event* Device::create_event() {
+    return new Event(device_);
+}
+
+SharedEvent* Device::create_shared_event() {
+    return new SharedEvent(device_);
+}
+
+SharedEvent* Device::create_shared_event_from_handle(SharedEventHandle* handle) {
+    return new SharedEvent(device_, handle);
+}
+
+Fence* Device::create_fence() {
+    return new Fence(device_);
 }
 
 uint32_t Device::max_threads_per_threadgroup() const {

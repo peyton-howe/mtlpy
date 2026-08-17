@@ -13,6 +13,11 @@ class Texture;
 class Sampler;
 class CommandBuffer;
 class Heap;
+class Queue;
+class Event;
+class SharedEvent;
+class SharedEventHandle;
+class Fence;
 
 class Device {
 public:
@@ -89,8 +94,26 @@ public:
     Sampler* create_sampler(bool linear, bool repeat);
 
     // Lets multiple Pipeline::run() dispatches batch into one command-
-    // buffer submission -- see CommandBuffer's own doc comment.
-    CommandBuffer* create_command_buffer();
+    // buffer submission -- see CommandBuffer's own doc comment. queue
+    // (default nullptr) targets a secondary Queue (see create_queue())
+    // instead of this Device's own default queue -- the mechanism for
+    // running work on more than one MTL::CommandQueue.
+    CommandBuffer* create_command_buffer(Queue* queue = nullptr);
+
+    // A second MTL::CommandQueue beyond this Device's own default one --
+    // see Queue's class doc comment.
+    Queue* create_queue();
+
+    // GPU-side-only cross-command-buffer/cross-queue signal -- see Event.
+    Event* create_event();
+
+    // Like create_event(), but adds CPU-visible signal/wait and a
+    // cross-process-exportable handle -- see SharedEvent.
+    SharedEvent* create_shared_event();
+    SharedEvent* create_shared_event_from_handle(SharedEventHandle* handle);
+
+    // Same-queue producer/consumer ordering primitive -- see Fence.
+    Fence* create_fence();
 
     uint32_t max_threads_per_threadgroup() const;
     void     flush_cache();

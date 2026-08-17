@@ -11,6 +11,7 @@ class Buffer;
 class Texture;
 class Sampler;
 class CommandBuffer;
+class Fence;
 
 class Pipeline {
 public:
@@ -58,6 +59,13 @@ public:
     // validation layer. Applies to both the batched (external_cb) and
     // self-contained dispatch paths. std::nullopt (the default) keeps the
     // existing auto-computed behavior.
+    //
+    // wait_fences/signal_fences (both default empty) encode
+    // MTL::ComputeCommandEncoder::waitForFence/updateFence calls immediately
+    // before/after this dispatch's setBuffer/setTexture/dispatchThreads
+    // calls, inside the same encoder -- see Fence's class doc comment for
+    // what this does and doesn't guarantee (in particular: same-queue only,
+    // unlike Event). Works the same whether or not external_cb is given.
     std::pair<double, double> run(
         const std::vector<Buffer*>&      buffers,
         const std::vector<Texture*>&     textures,
@@ -65,7 +73,9 @@ public:
         const std::array<uint32_t, 3>&   grid,
         bool                             wait,
         CommandBuffer*                   external_cb = nullptr,
-        const std::optional<std::array<uint32_t, 3>>& threadgroup = std::nullopt
+        const std::optional<std::array<uint32_t, 3>>& threadgroup = std::nullopt,
+        const std::vector<Fence*>&       wait_fences = {},
+        const std::vector<Fence*>&       signal_fences = {}
     );
 
     uint32_t thread_execution_width()       const;

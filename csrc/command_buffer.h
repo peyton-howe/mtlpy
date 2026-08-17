@@ -1,10 +1,13 @@
 #pragma once
 #include <Metal/Metal.hpp>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <utility>
 
 namespace mtlpy {
+
+class Event;
 
 // Lets multiple Pipeline::run() dispatches share one MTL::CommandBuffer
 // (and one MTL::ComputeCommandEncoder) instead of each paying its own
@@ -40,6 +43,24 @@ public:
     void encode(MTL::ComputePipelineState* state,
                 const std::function<void(MTL::ComputeCommandEncoder*)>& fn);
 
+    // Encodes a command-buffer-level wait on `event` reaching `value` --
+    // every command encoded into this CommandBuffer *after* this call (via
+    // encode(), or a later wait/signal) will not start on the GPU until the
+    // event does. Ends this CommandBuffer's currently-open encoder first if
+    // there is one (MTLCommandBuffer::encodeWaitForEvent is only legal
+    // between encoders, not while one is active) -- a later encode() call
+    // transparently opens a fresh one, so batching more dispatches into this
+    // CommandBuffer after a wait still works exactly as before, just with
+    // the wait spliced into the command stream at this point. Throws under
+    // the same conditions as encode() (already committed / already failed).
+    void encode_wait_for_event(Event* event, uint64_t value);
+
+    // The producer side of encode_wait_for_event(): signals `event` to
+    // `value` once every command encoded into this CommandBuffer *before*
+    // this call has completed on the GPU. Same encoder-splicing behavior as
+    // encode_wait_for_event() above.
+    void encode_signal_event(Event* event, uint64_t value);
+
     // Marks this CommandBuffer failed without going through encode() --
     // for Pipeline::run to call when it throws *before* ever reaching
     // encode() (e.g. its buffer/texture/sampler count validation), so a
@@ -63,6 +84,22 @@ public:
     std::pair<double, double> commit(bool wait);
 
 private:
+    // Throws if this CommandBuffer can no longer accept new work (already
+    // committed, or a previous encode()/encode_wait_for_event()/
+    // encode_signal_event() call already failed) -- shared by all three, so
+    // the "already committed"/"a previous dispatch failed" wording only
+    // exists once. Deliberately separate from commit()'s own guard just
+    // below it, which throws different (commit-specific) wording for the
+    // same two conditions. Callers must hold mutex_.
+    void check_encodable() const;
+
+    // Ends and releases encoder_ if one is currently open, leaving this
+    // CommandBuffer ready for either a fresh encode() or cmd_->commit().
+    // Shared by encode_wait_for_event()/encode_signal_event() (both need to
+    // splice a command-buffer-level call between encoders) -- callers must
+    // hold mutex_.
+    void close_encoder();
+
     std::mutex                  mutex_;
     MTL::CommandBuffer*         cmd_;      // +1 owned (explicitly retained)
     MTL::ComputeCommandEncoder* encoder_ = nullptr;  // +1 owned once created
