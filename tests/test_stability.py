@@ -106,6 +106,31 @@ def test_device_freed_deterministically_after_buffer_from_texture():
         gc.enable()
 
 
+def test_heap_from_public_api_keeps_its_device_alive():
+    """The flip side of the two tests above: Device._staging_heap needed a
+    *weak* back-reference to avoid a cycle, but a Heap from the public
+    Device.heap() must still hold its Device *strongly* -- Device never
+    caches those back (no cycle risk), and every other resource in this
+    library (Buffer, Texture, ...) already keeps its owning Device alive
+    for as long as it's held. A factory function that returns only the Heap
+    (not the Device that created it) is a realistic pattern -- confirm it
+    still works instead of the Device being freed out from under the Heap
+    (which previously surfaced as buf._device silently becoming None, then
+    an unrelated AttributeError far from the real cause)."""
+    from mtlpy import Device
+    from mtlpy.utils import StorageMode
+
+    def make_heap():
+        dev = Device()
+        return dev.heap(4096, storage=StorageMode.SHARED)
+
+    heap = make_heap()  # the local `dev` above is now out of scope
+    buf = heap.buffer(np.ones(4, dtype=np.float32))
+    assert buf._device is not None
+    result = buf + buf  # touches ._device via _binary_op's cross-device check
+    np.testing.assert_allclose(result.contents, [2.0, 2.0, 2.0, 2.0])
+
+
 def test_buffer_outlives_local_python_refs(device):
     """Buffer.contents returns a view holding an _mtlpy_buf backref so the
     Buffer (and therefore the Device) stays alive as long as the array does

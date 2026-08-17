@@ -190,7 +190,14 @@ class Device:
         many more small ones)."""
         nbytes = n_elements * np.dtype(dtype).itemsize
         if self._staging_heap is None or self._staging_heap.size < nbytes:
-            self._staging_heap = self.heap(nbytes, storage=StorageMode.SHARED)
+            # Not self.heap(...): this internally-cached Heap needs the
+            # weak-device variant (_weak_device=True) to avoid a Device <->
+            # Heap reference cycle -- see Heap.__init__'s own comment. A
+            # Heap from the public Device.heap() below must NOT use this --
+            # it needs to hold this Device strongly, like every other
+            # resource in this library.
+            raw = self._dev.create_heap(nbytes, int(StorageMode.SHARED))
+            self._staging_heap = Heap(raw, StorageMode.SHARED, self, _weak_device=True)
         return self._staging_heap.empty(n_elements, dtype)
 
     def clear_staging_heap(self) -> int:

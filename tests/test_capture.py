@@ -82,3 +82,16 @@ def test_start_capture_to_file_without_capture_enabled_raises(tmp_path, device):
     with pytest.raises(RuntimeError):
         device.start_capture(str(tmp_path / "trace.gputrace"))
     assert device.is_capturing is False
+
+
+def test_start_capture_creates_missing_parent_directories(tmp_path, device):
+    """Same convention as BinaryArchive.save()/the implicit pipeline cache's
+    default path: an output path in a directory that doesn't exist yet
+    should work transparently. Directory creation happens before the actual
+    capture attempt, so this is checkable even though the capture itself
+    still fails without MTL_CAPTURE_ENABLED=1 (see the test above)."""
+    nested = tmp_path / "nested" / "dirs" / "trace.gputrace"
+    assert not nested.parent.exists()
+    with pytest.raises(RuntimeError):
+        device.start_capture(str(nested))
+    assert nested.parent.is_dir()

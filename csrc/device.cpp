@@ -13,6 +13,7 @@
 #include "queue.h"
 #include "sampler.h"
 #include "texture.h"
+#include <filesystem>
 #include <functional>
 #include <stdexcept>
 
@@ -224,6 +225,13 @@ void Device::start_capture(const std::optional<std::string>& path) {
     auto* manager = MTL::CaptureManager::sharedCaptureManager();
 
     if (path) {
+        // Same convention as BinaryArchive::save() / PipelineCache's default
+        // archive path -- an output path in a not-yet-existing directory
+        // should work transparently, not fail with a raw Metal NSError.
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(*path).parent_path(), ec);
+
         auto* descriptor = MTL::CaptureDescriptor::alloc()->init();
         descriptor->setCaptureObject(device_);
         descriptor->setDestination(MTL::CaptureDestinationGPUTraceDocument);

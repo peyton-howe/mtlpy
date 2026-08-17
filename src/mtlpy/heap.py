@@ -55,19 +55,29 @@ class Heap:
     heaps only (no placement/sparse heaps), no aliasing control (every
     resource is non-aliased, Metal's default), no purgeability API."""
 
-    def __init__(self, _heap, storage: StorageMode, device):
+    def __init__(self, _heap, storage: StorageMode, device, *, _weak_device: bool = False):
         self._heap   = _heap    # _mtlpy.Heap
         self.storage = StorageMode(storage)
-        # weakref, not a plain strong reference: Device._staging_buffer()
-        # (backing Texture.upload()/.download()'s defaults) caches its
-        # lazily-grown Heap as Device._staging_heap -- a strong Heap ->
-        # Device reference here would close a cycle (Device -> _staging_heap
-        # -> Heap -> Device) that pure refcounting can never break on its
-        # own, same issue and same fix as Pipeline._device_ref in pipeline.py
-        # (see its comment for the full story -- confirmed by testing there,
-        # and this exact Heap path is what actually reproduces it from
-        # something as ordinary as Device.texture(data, pixel_format)).
-        self._device_ref = weakref.ref(device)  # needed for staging non-Shared writes
+        # _weak_device is for Device._staging_buffer()'s internal use only
+        # (see its own call site) -- it caches its lazily-grown Heap as
+        # Device._staging_heap, and a strong Heap -> Device reference here
+        # would close a cycle (Device -> _staging_heap -> Heap -> Device)
+        # that pure refcounting can never break on its own, same issue and
+        # same fix as Pipeline._device_ref in pipeline.py (see its comment
+        # for the full story). That internal Heap is never handed to a
+        # caller, so a weakref is safe there: every access to it happens
+        # from inside a Device method, where Device is definitionally alive.
+        #
+        # A Heap from the public Device.heap(), by contrast, must hold its
+        # Device *strongly* -- Device doesn't cache those back (no cycle
+        # risk), and every other resource in this library (Buffer, Texture,
+        # ...) already keeps its owning Device alive for as long as it's
+        # held; a weakref here would silently break that for any caller who
+        # holds a Heap without also separately holding its Device (e.g. a
+        # factory function that returns just the Heap) -- confirmed by
+        # testing: the Device wrapper was freed out from under the Heap,
+        # and self._device silently became None instead of a clear error.
+        self._device_ref = weakref.ref(device) if _weak_device else (lambda: device)
 
     @property
     def _device(self):
