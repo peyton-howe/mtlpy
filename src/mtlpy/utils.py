@@ -97,6 +97,8 @@ _PIXEL_FORMAT_TABLE = [
     ("rgba8Unorm",  70,  4, np.uint8,   True,  "float"),
     ("r8Uint",      13,  1, np.uint8,   False, "uint"),
     ("rgba8Uint",   73,  4, np.uint8,   False, "uint"),
+    ("r16Uint",     23,  1, np.uint16,  False, "uint"),
+    ("rgba16Uint",  113, 4, np.uint16,  False, "uint"),
     ("r16Float",    25,  1, np.float16, False, "half"),
     ("rgba16Float", 115, 4, np.float16, False, "half"),
     ("r32Float",    55,  1, np.float32, False, "float"),

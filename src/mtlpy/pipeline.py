@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import weakref
+
+from .sync import Event, Fence
+
 # Sentinel distinguishing "wait not passed" from "wait=True passed explicitly"
 # -- needed because True is also wait's own default, so a plain `wait: bool =
 # True` parameter can't tell the two apart. See Pipeline.run's cb/wait check.
@@ -16,12 +20,35 @@ def _pad_dims(spec) -> list[int]:
 
 
 class Pipeline:
-    def __init__(self, _pipeline):
+    def __init__(self, _pipeline, device):
         self._pipeline = _pipeline  # _mtlpy.Pipeline
+        # A weakref, not a plain strong reference: Device.buffer_from_texture()
+        # caches compiled Pipelines internally (Device._texture_to_buffer_pipelines),
+        # and a strong Pipeline -> Device reference here would close a cycle
+        # -- Device -> that cache dict -> Pipeline -> Device -- which pure
+        # refcounting can never break on its own. Confirmed by testing: with
+        # a strong reference, a Device used for even one buffer_from_texture()
+        # call was NOT freed by a plain `del device`; it took an explicit
+        # gc.collect() (or however long CPython's own cyclic collector took
+        # to eventually run, unlike this library's usual instant-on-last-ref
+        # teardown -- see e.g. Heap.used_size's docstring) to actually
+        # release the underlying MTL::Device/MTL::CommandQueue/compiled
+        # pipelines. A dead weakref (Device already collected) is only
+        # reachable if the caller drops every reference to their own Device
+        # while still directly holding this Pipeline -- an unusual pattern,
+        # handled conservatively below by treating it as "different device"
+        # (a clear ValueError) rather than silently skipping validation.
+        self._device_ref = weakref.ref(device)
+
+    @property
+    def _device(self):
+        return self._device_ref()
 
     def run(self, buffers: list, grid, wait=_WAIT_UNSET,
             textures: list | None = None, samplers: list | None = None,
-            cb: "CommandBuffer | None" = None, threadgroup=None) -> tuple[float, float]:
+            cb: "CommandBuffer | None" = None, threadgroup=None,
+            wait_fences: list[Fence] | None = None,
+            signal_fences: list[Fence] | None = None) -> tuple[float, float]:
         """Returns (gpu_start, gpu_end) in seconds -- pure device-side
         execution time for this dispatch (MTLCommandBuffer's GPUStartTime/
         GPUEndTime), excluding CPU-side encoding/dispatch overhead. Only
@@ -49,13 +76,27 @@ class Pipeline:
         constraints or this raises: total threads (w*h*d) <=
         max_threads_per_threadgroup, and a multiple of
         thread_execution_width. Leave as None (the default) to keep the
-        existing auto-computed size. Applies whether or not cb is given."""
+        existing auto-computed size. Applies whether or not cb is given.
+
+        wait_fences/signal_fences (both default None, treated as empty)
+        wait-for/update the given Fences immediately before/after this
+        dispatch's work inside its compute encoder -- see Fence's class
+        docstring for what this does and doesn't guarantee (in particular:
+        it only orders dispatches on the same MTL::CommandQueue -- see
+        Device.event()/.shared_event() for ordering across Queues). Applies
+        whether or not cb is given."""
         if cb is not None and wait is not _WAIT_UNSET:
             raise ValueError(
                 "wait has no effect when cb is given -- control waiting via "
                 "CommandBuffer.commit(wait) once, after every dispatch you want "
                 "batched together has been encoded, not per-dispatch"
             )
+        for fence in (*(wait_fences or ()), *(signal_fences or ())):
+            if fence._device is not self._device:
+                raise ValueError(
+                    "Fence belongs to a different Device instance -- Metal does not "
+                    "allow sharing resources across MTLDevice objects"
+                )
         wait = True if wait is _WAIT_UNSET else wait
         grid = _pad_dims(grid)
         tg = _pad_dims(threadgroup) if threadgroup is not None else None
@@ -67,6 +108,8 @@ class Pipeline:
             wait,
             cb._cb if cb is not None else None,
             tg,
+            [f._fence for f in (wait_fences or [])],
+            [f._fence for f in (signal_fences or [])],
         )
 
     @property
@@ -99,11 +142,26 @@ class CommandBuffer:
     Pipeline.run(cb=cb) call raises (e.g. an unbound-argument error), this
     CommandBuffer is marked failed at the C++ layer, and commit() -- however
     you reach it -- then raises too instead of silently submitting whatever
-    was successfully encoded before the failure."""
+    was successfully encoded before the failure.
 
-    def __init__(self, _cb):
+    wait_for_event()/signal_event() splice a GPU-side wait/signal into this
+    batch's command stream, ordering it against other CommandBuffers --
+    including ones on a different Device.queue() -- see Event's class
+    docstring."""
+
+    def __init__(self, _cb, device):
         self._cb        = _cb    # _mtlpy.CommandBuffer
+        # weakref, not a plain strong reference -- same cycle-avoidance
+        # reasoning as Pipeline._device_ref (see its comment): Device
+        # doesn't currently cache CommandBuffers back the way it does
+        # Pipelines, but there's no reason for this class to rely on that
+        # staying true.
+        self._device_ref = weakref.ref(device)
         self._committed = False
+
+    @property
+    def _device(self):
+        return self._device_ref()
 
     def __enter__(self) -> "CommandBuffer":
         return self
@@ -111,6 +169,31 @@ class CommandBuffer:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         if exc_type is None and not self._committed:
             self.commit()
+
+    def wait_for_event(self, event: Event, value: int) -> None:
+        """Splices a command-buffer-level wait into this batch: nothing
+        encoded into this CommandBuffer *after* this call (via
+        Pipeline.run(..., cb=cb), or a later wait_for_event()/signal_event())
+        starts on the GPU until event reaches value -- work encoded *before*
+        this call is unaffected. See Event's class docstring for the
+        producer/consumer pattern this is half of."""
+        if event._device is not self._device:
+            raise ValueError(
+                "Event belongs to a different Device instance -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
+        self._cb.encode_wait_for_event(event._event, value)
+
+    def signal_event(self, event: Event, value: int) -> None:
+        """The producer side of wait_for_event(): signals event to value
+        once every dispatch encoded into this CommandBuffer *before* this
+        call has completed on the GPU."""
+        if event._device is not self._device:
+            raise ValueError(
+                "Event belongs to a different Device instance -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
+        self._cb.encode_signal_event(event._event, value)
 
     def commit(self, wait: bool = True) -> tuple[float, float]:
         """Ends encoding and submits every dispatch encoded into this

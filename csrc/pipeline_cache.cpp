@@ -36,9 +36,13 @@ NS::URL* url_for(const std::string& path) {
 
 } // namespace
 
-PipelineCache::PipelineCache(MTL::Device* device)
-    : archive_path_(default_archive_path())
+PipelineCache::PipelineCache(MTL::Device* device, const std::optional<std::string>& cache_path)
+    : archive_path_(cache_path.has_value() ? *cache_path : default_archive_path())
 {
+    // Empty either because cache_path == "" was passed explicitly (on-disk
+    // caching disabled) or default_archive_path() couldn't determine a
+    // location (e.g. $HOME unset) -- either way, archive_ just stays null
+    // and get_or_create() compiles from source every time.
     if (archive_path_.empty())
         return;
 
@@ -59,8 +63,10 @@ PipelineCache::PipelineCache(MTL::Device* device)
 PipelineCache::~PipelineCache() {
     PoolGuard guard;
 
-    for (auto& [key, cached] : cache_)
+    for (auto& [key, cached] : cache_) {
         cached.state->release();
+        cached.function->release();
+    }
 
     if (archive_) {
         NS::Error* error = nullptr;
@@ -69,31 +75,58 @@ PipelineCache::~PipelineCache() {
     }
 }
 
-void PipelineCache::flush() {
+void PipelineCache::flush(const std::optional<std::string>& path) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!archive_)
         return;
     PoolGuard guard;
     NS::Error* error = nullptr;
-    archive_->serializeToURL(url_for(archive_path_), &error);
+    archive_->serializeToURL(url_for(path.has_value() ? *path : archive_path_), &error);
     // Best-effort, same as the destructor's serialize call -- a failed
     // flush (e.g. disk full) just means the next process recompiles from
     // source, not a reason to raise from what's meant to be a cheap,
     // periodic checkpoint.
 }
 
+size_t PipelineCache::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_.size();
+}
+
+void PipelineCache::register_in_archive(MTL::BinaryArchive* archive, MTL::Function* function) {
+    if (!archive)
+        return;
+    PoolGuard guard;
+    auto* descriptor = MTL::ComputePipelineDescriptor::alloc()->init();
+    descriptor->setComputeFunction(function);
+    descriptor->setThreadGroupSizeIsMultipleOfThreadExecutionWidth(true);
+    NS::Error* error = nullptr;
+    archive->addComputePipelineFunctions(descriptor, &error);
+    descriptor->release();
+}
+
 CachedPipeline PipelineCache::get_or_create(
-    MTL::Device*       device,
-    const std::string& source,
-    const std::string& function_name
+    MTL::Device*        device,
+    const std::string&  source,
+    const std::string&  function_name,
+    MTL::BinaryArchive* extra_archive
 ) {
     std::string key = source + '\0' + function_name;
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // unique_lock (not lock_guard): the cache-hit branch below explicitly
+    // unlocks before register_in_archive()'s Metal call -- mutex_ only ever
+    // needs to protect cache_ itself, not an addComputePipelineFunctions
+    // call against a caller-supplied archive, so there's no reason for that
+    // call to serialize against unrelated compiles/lookups on this cache.
+    std::unique_lock<std::mutex> lock(mutex_);
 
     auto it = cache_.find(key);
-    if (it != cache_.end())
-        return it->second;
+    if (it != cache_.end()) {
+        CachedPipeline cached = it->second;
+        lock.unlock();
+        register_in_archive(extra_archive, cached.function);
+        return cached;
+    }
 
     PoolGuard guard;
 
@@ -116,7 +149,13 @@ CachedPipeline PipelineCache::get_or_create(
 
     auto* descriptor = MTL::ComputePipelineDescriptor::alloc()->init();
     descriptor->setComputeFunction(function);
-    function->release();
+    // function is NOT released here (unlike library, which nothing needs
+    // past this point): descriptor->setComputeFunction() takes its own
+    // internal +1 for the descriptor's own use, same as always, but this
+    // +1 (from newFunction() above) is kept as CachedPipeline::function --
+    // see the struct's own doc comment for why. Released either in the
+    // failure path just below, or -- once state creation actually succeeds
+    // -- in PipelineCache's destructor, alongside cached.state.
 
     // compute_threadgroup_size() in Pipeline always dispatches this pipeline
     // with threadgroup sizes that are multiples of threadExecutionWidth,
@@ -146,6 +185,7 @@ CachedPipeline PipelineCache::get_or_create(
 
     if (!state) {
         descriptor->release();
+        function->release();  // see the comment above -- never got to CachedPipeline
         throw std::runtime_error(
             std::string("Failed to create pipeline state: ") +
             error->localizedDescription()->utf8String()
@@ -156,6 +196,7 @@ CachedPipeline PipelineCache::get_or_create(
         NS::Error* archive_error = nullptr;
         archive_->addComputePipelineFunctions(descriptor, &archive_error);
     }
+    register_in_archive(extra_archive, function);
 
     descriptor->release();
 
@@ -189,7 +230,7 @@ CachedPipeline PipelineCache::get_or_create(
         }
     }
 
-    CachedPipeline cached{state, required_buffer_count, required_texture_count, required_sampler_count};
+    CachedPipeline cached{state, function, required_buffer_count, required_texture_count, required_sampler_count};
     cache_[key] = cached;
     return cached;
 }

@@ -7,11 +7,16 @@
 #include <string>
 #include <vector>
 #include "device.h"
+#include "binary_archive.h"
 #include "buffer.h"
+#include "capture.h"
 #include "command_buffer.h"
 #include "dlpack.h"
+#include "event.h"
+#include "fence.h"
 #include "heap.h"
 #include "pipeline.h"
+#include "queue.h"
 #include "sampler.h"
 #include "texture.h"
 
@@ -24,17 +29,38 @@ NB_MODULE(_mtlpy, m) {
     m.def("list_devices", &Device::available_device_names);
 
     nb::class_<Device>(m, "Device")
-        .def(nb::init<int>(), nb::arg("index") = -1)
+        .def(nb::init<int, std::optional<std::string>>(),
+             nb::arg("index") = -1, nb::arg("cache_path") = std::nullopt)
         .def("create_buffer", &Device::create_buffer,
              nb::arg("size_bytes"), nb::arg("storage_mode"),
              nb::rv_policy::take_ownership,
              nb::keep_alive<0, 1>())   // keep Device alive while Buffer is alive
         .def("compile", &Device::compile,
-             nb::arg("source"), nb::arg("function_name"),
+             nb::arg("source"), nb::arg("function_name"), nb::arg("archive") = nullptr,
              nb::rv_policy::take_ownership,
              nb::keep_alive<0, 1>())   // keep Device alive while Pipeline is alive
         .def("max_threads_per_threadgroup", &Device::max_threads_per_threadgroup)
-        .def("flush_cache", &Device::flush_cache)
+        .def("flush_cache", &Device::flush_cache, nb::arg("path") = std::nullopt)
+        .def("create_binary_archive", &Device::create_binary_archive,
+             nb::arg("path"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Device alive while BinaryArchive is alive
+        .def_prop_ro("pipeline_cache_size", &Device::pipeline_cache_size)
+        .def_prop_ro("pipeline_cache_path", &Device::pipeline_cache_path)
+        .def("start_capture", &Device::start_capture, nb::arg("path") = std::nullopt)
+        .def("stop_capture", &Device::stop_capture)
+        // is_capturing() is a static method (MTLCaptureManager is a
+        // process-wide singleton, not per-Device) -- def_static keeps it
+        // callable both as Device.is_capturing() and off an instance
+        // (self._dev.is_capturing()), the same as a Python staticmethod.
+        .def_static("is_capturing", &Device::is_capturing)
+        .def("create_capture_scope", &Device::create_capture_scope,
+             nb::arg("label"), nb::arg("queue") = nullptr,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>(),   // keep Device alive while CaptureScope is alive
+             nb::keep_alive<0, 3>())   // ...and queue too, if given (same MTLResource-vs-not
+                                       // rationale as CommandBuffer::encode_wait_for_event's
+                                       // keep_alive, see above)
         .def_prop_ro("mtl_ptr", [](const Device& d) {
             // The id<MTLDevice> handle itself -- raw, non-owning (this
             // Device's destructor still owns the real release()). For
@@ -76,12 +102,33 @@ NB_MODULE(_mtlpy, m) {
              nb::rv_policy::take_ownership,
              nb::keep_alive<0, 1>())   // keep Device alive while Sampler is alive
         .def("create_command_buffer", &Device::create_command_buffer,
+             nb::arg("queue") = nullptr,
              nb::rv_policy::take_ownership,
-             nb::keep_alive<0, 1>())   // keep Device alive while CommandBuffer is alive
+             nb::keep_alive<0, 1>(),   // keep Device alive while CommandBuffer is alive
+             nb::keep_alive<0, 2>())   // ...and queue too, if given -- the returned
+                                       // CommandBuffer's cmd_ is tied to queue's
+                                       // MTL::CommandQueue for its whole lifetime,
+                                       // same rationale as create_capture_scope's below
         .def("create_heap", &Device::create_heap,
              nb::arg("size_bytes"), nb::arg("storage_mode"),
              nb::rv_policy::take_ownership,
-             nb::keep_alive<0, 1>());  // keep Device alive while Heap is alive
+             nb::keep_alive<0, 1>())   // keep Device alive while Heap is alive
+        .def("create_queue", &Device::create_queue,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Device alive while Queue is alive
+        .def("create_event", &Device::create_event,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Device alive while Event is alive
+        .def("create_shared_event", &Device::create_shared_event,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Device alive while SharedEvent is alive
+        .def("create_shared_event_from_handle", &Device::create_shared_event_from_handle,
+             nb::arg("handle"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Device alive while SharedEvent is alive
+        .def("create_fence", &Device::create_fence,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>());  // keep Device alive while Fence is alive
 
     nb::class_<Buffer>(m, "Buffer")
         .def_prop_ro("data_ptr", [](const Buffer& b) {
@@ -172,6 +219,13 @@ NB_MODULE(_mtlpy, m) {
             return nb::steal<nb::object>(capsule);
         }, nb::arg("dtype_code"), nb::arg("dtype_bits"), nb::arg("shape"));
 
+    nb::class_<BinaryArchive>(m, "BinaryArchive")
+        .def("save", &BinaryArchive::save, nb::arg("path") = "");
+
+    nb::class_<CaptureScope>(m, "CaptureScope")
+        .def("begin_scope", &CaptureScope::begin_scope)
+        .def("end_scope", &CaptureScope::end_scope);
+
     nb::class_<Heap>(m, "Heap")
         .def("new_buffer", &Heap::new_buffer,
              nb::arg("size_bytes"),
@@ -239,12 +293,58 @@ NB_MODULE(_mtlpy, m) {
 
     nb::class_<Sampler>(m, "Sampler");
 
+    nb::class_<Queue>(m, "Queue")
+        .def_prop_ro("mtl_ptr", [](const Queue& q) {
+            // Same raw-pointer, non-owning convention as Device.mtl_ptr/
+            // Buffer.mtl_ptr -- valid only as long as this Queue is alive.
+            return reinterpret_cast<uintptr_t>(q.mtl());
+        });
+
+    nb::class_<Fence>(m, "Fence")
+        .def_prop_ro("mtl_ptr", [](const Fence& f) {
+            return reinterpret_cast<uintptr_t>(f.mtl());
+        });
+
+    nb::class_<Event>(m, "Event")
+        .def_prop_ro("mtl_ptr", [](const Event& e) {
+            return reinterpret_cast<uintptr_t>(e.mtl());
+        });
+
+    nb::class_<SharedEventHandle>(m, "SharedEventHandle");
+
+    nb::class_<SharedEvent, Event>(m, "SharedEvent")
+        .def("signal", &SharedEvent::signal, nb::arg("value"))
+        .def_prop_ro("signaled_value", &SharedEvent::signaled_value)
+        .def("wait", &SharedEvent::wait,
+             nb::arg("value"), nb::arg("timeout_ms"),
+             // Blocks the calling thread on Metal's own condition variable
+             // (waitUntilSignaledValue) -- same rationale as CommandBuffer::
+             // commit(wait=True) for releasing the GIL around a blocking call.
+             nb::call_guard<nb::gil_scoped_release>())
+        .def("new_shared_event_handle", &SharedEvent::new_shared_event_handle,
+             nb::rv_policy::take_ownership);
+
     nb::class_<CommandBuffer>(m, "CommandBuffer")
         .def("commit", &CommandBuffer::commit,
              nb::arg("wait") = true,
              // Same rationale as Pipeline::run's GIL release below -- this
              // blocks on waitUntilCompleted() when wait=True.
-             nb::call_guard<nb::gil_scoped_release>());
+             nb::call_guard<nb::gil_scoped_release>())
+        .def("encode_wait_for_event", &CommandBuffer::encode_wait_for_event,
+             nb::arg("event"), nb::arg("value"),
+             // Unlike buffers/textures/samplers (which Metal's own encoder
+             // retains internally once bound -- see Pipeline::run's binding
+             // below), MTLEvent isn't an MTLResource and isn't documented as
+             // being retained by encodeWaitForEvent/encodeSignalEvent -- keep
+             // this CommandBuffer's Python wrapper holding a reference to
+             // `event` for as long as the CommandBuffer itself is alive, so
+             // a caller passing a throwaway `device.event()` inline can't
+             // have it garbage-collected (and the underlying MTL::Event
+             // released) while a wait=False commit is still pending on it.
+             nb::keep_alive<1, 2>())
+        .def("encode_signal_event", &CommandBuffer::encode_signal_event,
+             nb::arg("event"), nb::arg("value"),
+             nb::keep_alive<1, 2>());  // same rationale as encode_wait_for_event above
 
     nb::class_<Pipeline>(m, "Pipeline")
         .def("run", &Pipeline::run,
@@ -252,13 +352,24 @@ NB_MODULE(_mtlpy, m) {
              nb::arg("grid"), nb::arg("wait") = true,
              nb::arg("command_buffer") = nullptr,
              nb::arg("threadgroup") = std::nullopt,
+             nb::arg("wait_fences") = std::vector<Fence*>{},
+             nb::arg("signal_fences") = std::vector<Fence*>{},
              // Pipeline::run touches only raw C++/Metal state after argument
              // conversion (no PyObject* access), so it's safe to release the
              // GIL for the whole call -- otherwise a wait=True dispatch fully
              // blocks every other Python thread for the entire GPU round
              // trip (confirmed: a background thread made ~zero progress
              // during the call, not just some).
-             nb::call_guard<nb::gil_scoped_release>())
+             nb::call_guard<nb::gil_scoped_release>(),
+             // Same rationale as CommandBuffer::encode_wait_for_event's
+             // keep_alive above: MTL::Fence isn't an MTLResource, so there's
+             // no guaranteed internal retain from waitForFence/updateFence
+             // to lean on the way setBuffer/setTexture's does. Ties each
+             // list's lifetime (and thus every Fence element it holds a
+             // reference to) to this Pipeline, which callers already keep
+             // alive for as long as they keep dispatching -- comfortably
+             // longer than any one in-flight dispatch needs.
+             nb::keep_alive<1, 9>(), nb::keep_alive<1, 10>())
         .def("thread_execution_width",      &Pipeline::thread_execution_width)
         .def("max_threads_per_threadgroup", &Pipeline::max_threads_per_threadgroup);
 }

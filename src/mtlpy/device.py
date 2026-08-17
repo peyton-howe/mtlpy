@@ -1,8 +1,11 @@
 from __future__ import annotations
 import numpy as np
+from .binary_archive import BinaryArchive
 from .buffer import Buffer
+from .capture import Capture, CaptureScope
 from .heap import Heap
 from .pipeline import CommandBuffer, Pipeline
+from .sync import Event, Fence, Queue, SharedEvent, SharedEventHandle
 from .texture import Sampler, Texture
 from . import utils, shader
 from .utils import StorageMode, TEXTURE_USAGE_SHADER_READ, TEXTURE_USAGE_SHADER_WRITE
@@ -46,10 +49,29 @@ def list_devices() -> list[str]:
 
 
 class Device:
-    def __init__(self, index: int | None = None):
+    def __init__(self, index: int | None = None, cache_path: str | bool | None = None):
         """index selects a specific GPU from list_devices() (for multi-GPU
-        machines); the default (None) uses the system default GPU."""
-        self._dev = _mtlpy.Device(-1 if index is None else index)
+        machines); the default (None) uses the system default GPU.
+
+        cache_path controls where this Device's on-disk compiled-pipeline
+        cache lives (see flush_cache()/.pipeline_cache_path): the default
+        (None) uses ~/Library/Caches/mtlpy/pipelines.metallib; False
+        disables on-disk caching entirely (compiled pipelines are still
+        deduped in memory for this process, just never written to/read from
+        disk); any other value is used as a custom path instead."""
+        if cache_path is False:
+            resolved_cache_path: str | None = ""
+        elif cache_path is None:
+            resolved_cache_path = None
+        elif cache_path is True:
+            raise TypeError(
+                "cache_path=True is not a valid value -- pass a path string for a "
+                "custom location, False to disable on-disk caching, or omit it "
+                "(or pass None) for the default location"
+            )
+        else:
+            resolved_cache_path = str(cache_path)
+        self._dev = _mtlpy.Device(-1 if index is None else index, resolved_cache_path)
         # Compiled texture_to_buffer_kernel Pipelines, keyed by the (dims,
         # read_t, store_t, channels, normalized) signature buffer_from_texture()
         # generates MSL source from -- avoids re-generating an identical
@@ -80,12 +102,39 @@ class Device:
     def __exit__(self, *exc_info) -> None:
         self.flush_cache()
 
-    def flush_cache(self) -> None:
+    def flush_cache(self, path: str | None = None) -> None:
         """Serialize the on-disk compiled-pipeline cache now, rather than
         waiting for this Device to be garbage collected. Useful for a
         long-running process that wants newly-compiled kernels to survive
-        a crash, or just deterministic cleanup via `with mtlpy.Device() as d:`."""
-        self._dev.flush_cache()
+        a crash, or just deterministic cleanup via `with mtlpy.Device() as d:`.
+
+        path (default None) overrides the destination for this call only,
+        without changing where future flush_cache() calls (or garbage
+        collection) write to -- see Device(cache_path=...) to change that
+        permanently."""
+        self._dev.flush_cache(path)
+
+    @property
+    def pipeline_cache_size(self) -> int:
+        """Number of distinct (source, function_name) pipelines currently
+        cached in memory for this Device -- includes ones the on-disk
+        archive hasn't necessarily been given a chance to persist yet (see
+        flush_cache())."""
+        return self._dev.pipeline_cache_size
+
+    @property
+    def pipeline_cache_path(self) -> str:
+        """Where this Device's on-disk compiled-pipeline cache lives --
+        empty string if disabled (Device(cache_path=False)) or
+        undeterminable (e.g. $HOME unset)."""
+        return self._dev.pipeline_cache_path
+
+    def binary_archive(self, path: str | None = None) -> BinaryArchive:
+        """A user-managed MTL::BinaryArchive independent of this Device's
+        own internal pipeline cache -- see BinaryArchive's class docstring.
+        path to an existing file opens it; omitted (or a path that doesn't
+        exist yet) starts a fresh, empty archive."""
+        return BinaryArchive(self._dev.create_binary_archive(path), self)
 
     def buffer(self, data: np.ndarray | int, dtype=None,
                storage: StorageMode = StorageMode.SHARED) -> Buffer:
@@ -141,7 +190,14 @@ class Device:
         many more small ones)."""
         nbytes = n_elements * np.dtype(dtype).itemsize
         if self._staging_heap is None or self._staging_heap.size < nbytes:
-            self._staging_heap = self.heap(nbytes, storage=StorageMode.SHARED)
+            # Not self.heap(...): this internally-cached Heap needs the
+            # weak-device variant (_weak_device=True) to avoid a Device <->
+            # Heap reference cycle -- see Heap.__init__'s own comment. A
+            # Heap from the public Device.heap() below must NOT use this --
+            # it needs to hold this Device strongly, like every other
+            # resource in this library.
+            raw = self._dev.create_heap(nbytes, int(StorageMode.SHARED))
+            self._staging_heap = Heap(raw, StorageMode.SHARED, self, _weak_device=True)
         return self._staging_heap.empty(n_elements, dtype)
 
     def clear_staging_heap(self) -> int:
@@ -187,8 +243,14 @@ class Device:
             size_bytes = src.size * src.dtype.itemsize - src_offset
         self._dev.copy_buffer(src._buf, src_offset, dst._buf, dst_offset, size_bytes, wait)
 
-    def compile(self, source: str, function_name: str) -> Pipeline:
-        return Pipeline(self._dev.compile(source, function_name))
+    def compile(self, source: str, function_name: str, archive: BinaryArchive | None = None) -> Pipeline:
+        """archive (default None), if given, additionally registers the
+        compiled pipeline into that BinaryArchive -- on top of this
+        Device's own internal cache, which always happens regardless. See
+        BinaryArchive's class docstring for why you'd want a second,
+        explicit archive."""
+        raw = self._dev.compile(source, function_name, archive._archive if archive is not None else None)
+        return Pipeline(raw, self)
 
     def heap(self, size_bytes: int, storage: StorageMode = StorageMode.SHARED) -> Heap:
         """A memory pool (MTL::Heap) of at least size_bytes to sub-allocate
@@ -357,15 +419,108 @@ class Device:
         raw = self._dev.create_sampler(linear, repeat)
         return Sampler(raw, linear, repeat, self)
 
-    def command_buffer(self) -> CommandBuffer:
+    def command_buffer(self, queue: Queue | None = None) -> CommandBuffer:
         """A batch of Pipeline.run() dispatches that share one MTLCommandBuffer
         submission -- see CommandBuffer's docstring for the context-manager
         usage. Use this instead of separate Pipeline.run() calls when you
         have multiple dispatches that always run together (e.g. a multi-pass
         kernel), to pay one command-buffer-submit + wait instead of one per
-        dispatch."""
-        raw = self._dev.create_command_buffer()
-        return CommandBuffer(raw)
+        dispatch.
+
+        queue (default None) submits this batch on a secondary Queue (see
+        Device.queue()) instead of this Device's own default queue -- the
+        mechanism for running independent streams of work on more than one
+        MTL::CommandQueue, synchronized only where a CommandBuffer.wait_for_event()/
+        .signal_event() call says so."""
+        if queue is not None and queue._device is not self:
+            raise ValueError(
+                "Queue belongs to a different Device instance -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
+        raw = self._dev.create_command_buffer(queue._queue if queue is not None else None)
+        return CommandBuffer(raw, self)
+
+    def queue(self) -> Queue:
+        """A second MTL::CommandQueue beyond this Device's own default one --
+        see Queue's class docstring for what it's for and its one
+        restriction (only reachable via the batched Device.command_buffer(queue=...)
+        path, not a Pipeline's self-contained dispatch)."""
+        return Queue(self._dev.create_queue(), self)
+
+    def event(self) -> Event:
+        """A GPU-side-only synchronization primitive for ordering work
+        across separate CommandBuffers/Queues -- see Event's class
+        docstring for the producer/consumer pattern. Cheaper than
+        shared_event() when nothing needs to read/wait on it from the CPU."""
+        return Event(self._dev.create_event(), self)
+
+    def shared_event(self) -> SharedEvent:
+        """Like event(), but adds CPU-visible signal()/.signaled_value/
+        wait() for CPU<->GPU handoff, and export_handle() for cross-process
+        use -- see SharedEvent's class docstring."""
+        return SharedEvent(self._dev.create_shared_event(), self)
+
+    def import_shared_event(self, handle: SharedEventHandle) -> SharedEvent:
+        """The receiving end of SharedEvent.export_handle(): reconstructs
+        the same underlying MTL::SharedEvent from a handle another process
+        exported (see SharedEventHandle's docstring for how the handle
+        itself needs to reach this process)."""
+        return SharedEvent(self._dev.create_shared_event_from_handle(handle._handle), self)
+
+    def fence(self) -> Fence:
+        """A same-queue producer/consumer ordering primitive for
+        Pipeline.run's wait_fences/signal_fences -- see Fence's class
+        docstring for what it does and doesn't guarantee."""
+        return Fence(self._dev.create_fence(), self)
+
+    def start_capture(self, path: str | None = None) -> Capture:
+        """Starts a GPU frame capture (MTLCaptureManager) covering every
+        dispatch/blit on this Device from now until stop_capture(). path
+        (default None) captures to a .gputrace file at that location,
+        openable later in Xcode; omitted, captures live to an attached
+        Xcode debugger's GPU debugger instead (raises if none is attached).
+        Either way requires the MTL_CAPTURE_ENABLED=1 environment variable
+        to be set for this process -- Metal disables programmatic capture
+        entirely otherwise, regardless of destination.
+
+        Returns a Capture usable as an optional context manager for the
+        matching stop_capture() call:
+
+            with device.start_capture("trace.gputrace"):
+                pipeline.run(bufs, grid)
+            # stop_capture() already called here
+
+        Calling device.stop_capture() directly (ignoring the return value)
+        works exactly the same."""
+        self._dev.start_capture(path)
+        return Capture(self)
+
+    def stop_capture(self) -> None:
+        """Ends a capture started by start_capture() -- on *any* Device:
+        this is Metal's own process-wide MTLCaptureManager, not per-Device
+        state, so it stops whatever capture is currently active regardless
+        of which Device.start_capture() call began it."""
+        self._dev.stop_capture()
+
+    @property
+    def is_capturing(self) -> bool:
+        """Whether a GPU capture is currently active anywhere in this
+        process -- not scoped to this Device specifically, same caveat as
+        stop_capture()."""
+        return self._dev.is_capturing()
+
+    def capture_scope(self, label: str | None = None, queue: Queue | None = None) -> CaptureScope:
+        """A labeled begin/end marker for Xcode's GPU debugger timeline --
+        see CaptureScope's class docstring. queue (default None) scopes it
+        to a secondary Queue (see Device.queue()) instead of this Device's
+        own default queue/command-buffer activity."""
+        if queue is not None and queue._device is not self:
+            raise ValueError(
+                "Queue belongs to a different Device instance -- Metal does not "
+                "allow sharing resources across MTLDevice objects"
+            )
+        raw = self._dev.create_capture_scope(label, queue._queue if queue is not None else None)
+        return CaptureScope(raw, self)
 
     def _binary_op(self, name: str, shader_fn, a: Buffer, b: Buffer, out: Buffer | None = None) -> Buffer:
         if a._device is not b._device:

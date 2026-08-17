@@ -1,6 +1,7 @@
 #include "pipeline.h"
 #include "buffer.h"
 #include "command_buffer.h"
+#include "fence.h"
 #include "metal_error.h"
 #include "pool_guard.h"
 #include "sampler.h"
@@ -112,7 +113,9 @@ std::pair<double, double> Pipeline::run(
     const std::array<uint32_t, 3>& grid,
     bool                           wait,
     CommandBuffer*                 external_cb,
-    const std::optional<std::array<uint32_t, 3>>& threadgroup
+    const std::optional<std::array<uint32_t, 3>>& threadgroup,
+    const std::vector<Fence*>&     wait_fences,
+    const std::vector<Fence*>&     signal_fences
 ) {
     // PoolGuard covers both branches below (not just the self-contained
     // one) -- it's stack-scoped to this single function call either way,
@@ -168,6 +171,8 @@ std::pair<double, double> Pipeline::run(
         // CommandBuffer reuse the same Pipeline), so it's pulled out to be
         // handled explicitly by each branch below instead.
         auto bind_resources_and_dispatch = [&](MTL::ComputeCommandEncoder* encoder) {
+            for (auto* f : wait_fences)
+                encoder->waitForFence(f->mtl());
             for (size_t i = 0; i < buffers.size(); ++i)
                 encoder->setBuffer(buffers[i]->mtl(), 0, i);
             for (size_t i = 0; i < textures.size(); ++i)
@@ -175,6 +180,8 @@ std::pair<double, double> Pipeline::run(
             for (size_t i = 0; i < samplers.size(); ++i)
                 encoder->setSamplerState(samplers[i]->mtl(), i);
             encoder->dispatchThreads(grid_size, threads_per_group);
+            for (auto* f : signal_fences)
+                encoder->updateFence(f->mtl());
         };
 
         if (external_cb) {

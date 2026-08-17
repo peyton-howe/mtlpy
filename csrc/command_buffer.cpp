@@ -1,4 +1,5 @@
 #include "command_buffer.h"
+#include "event.h"
 #include "metal_error.h"
 #include <stdexcept>
 
@@ -45,9 +46,7 @@ CommandBuffer::~CommandBuffer() {
     cmd_->release();
 }
 
-void CommandBuffer::encode(MTL::ComputePipelineState* state,
-                            const std::function<void(MTL::ComputeCommandEncoder*)>& fn) {
-    std::lock_guard<std::mutex> lock(mutex_);
+void CommandBuffer::check_encodable() const {
     if (committed_)
         throw std::runtime_error(
             "CommandBuffer already committed -- cannot encode more work into it");
@@ -55,6 +54,12 @@ void CommandBuffer::encode(MTL::ComputePipelineState* state,
         throw std::runtime_error(
             "A previous dispatch encoded into this CommandBuffer failed -- the batch "
             "is incomplete and cannot be committed; create a new CommandBuffer instead");
+}
+
+void CommandBuffer::encode(MTL::ComputePipelineState* state,
+                            const std::function<void(MTL::ComputeCommandEncoder*)>& fn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    check_encodable();
     try {
         if (!encoder_) {
             encoder_ = cmd_->computeCommandEncoder();
@@ -71,6 +76,29 @@ void CommandBuffer::encode(MTL::ComputePipelineState* state,
         failed_ = true;
         throw;
     }
+}
+
+void CommandBuffer::close_encoder() {
+    if (encoder_) {
+        encoder_->endEncoding();
+        encoder_->release();
+        encoder_ = nullptr;
+        last_state_ = nullptr;
+    }
+}
+
+void CommandBuffer::encode_wait_for_event(Event* event, uint64_t value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    check_encodable();
+    close_encoder();
+    cmd_->encodeWait(event->mtl(), value);
+}
+
+void CommandBuffer::encode_signal_event(Event* event, uint64_t value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    check_encodable();
+    close_encoder();
+    cmd_->encodeSignalEvent(event->mtl(), value);
 }
 
 void CommandBuffer::mark_failed() {
