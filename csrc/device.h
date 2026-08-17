@@ -1,6 +1,7 @@
 #pragma once
 #include <Metal/Metal.hpp>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,13 +19,20 @@ class Event;
 class SharedEvent;
 class SharedEventHandle;
 class Fence;
+class BinaryArchive;
+class CaptureScope;
 
 class Device {
 public:
     // index < 0 (the default) uses CreateSystemDefaultDevice(); index >= 0
     // selects that position in available_device_names()/CopyAllDevices(),
     // for multi-GPU machines.
-    explicit Device(int index = -1);
+    //
+    // cache_path -- see PipelineCache's constructor: std::nullopt (the
+    // default) uses this Device's usual on-disk pipeline cache location;
+    // an empty string disables on-disk pipeline caching for this Device
+    // entirely; any other string uses that path instead.
+    explicit Device(int index = -1, const std::optional<std::string>& cache_path = std::nullopt);
     ~Device();
 
     // storage_mode -- see Buffer's constructor in buffer.h.
@@ -33,7 +41,10 @@ public:
     // storage_mode -- see Heap's constructor in heap.h.
     Heap*     create_heap(size_t size_bytes, uint32_t storage_mode);
 
-    Pipeline* compile(const std::string& source, const std::string& function_name);
+    // archive (default nullptr) -- see BinaryArchive's class doc comment
+    // and PipelineCache::get_or_create's extra_archive param.
+    Pipeline* compile(const std::string& source, const std::string& function_name,
+                       BinaryArchive* archive = nullptr);
 
     // dims is 1/2/3 (see Texture); pixel_format is a raw MTL::PixelFormat
     // value (see src/mtlpy/utils.py's pixel format table). usage/
@@ -115,8 +126,49 @@ public:
     // Same-queue producer/consumer ordering primitive -- see Fence.
     Fence* create_fence();
 
+    // A user-managed MTL::BinaryArchive independent of this Device's own
+    // internal pipeline cache -- see BinaryArchive's class doc comment.
+    // path std::nullopt/empty creates a fresh in-memory archive; a path to
+    // an existing file opens it.
+    BinaryArchive* create_binary_archive(const std::optional<std::string>& path);
+
+    // Number of distinct (source, function_name) pipelines currently cached
+    // in memory for this Device -- see PipelineCache::size().
+    size_t pipeline_cache_size() const;
+
+    // Where this Device's on-disk pipeline cache lives -- empty if disabled
+    // (see the cache_path constructor param) or undeterminable.
+    const std::string& pipeline_cache_path() const;
+
     uint32_t max_threads_per_threadgroup() const;
-    void     flush_cache();
+
+    // path (default std::nullopt) overrides the destination for this call
+    // only -- see PipelineCache::flush().
+    void flush_cache(const std::optional<std::string>& path = std::nullopt);
+
+    // Starts a GPU frame capture (MTLCaptureManager) covering every
+    // dispatch/blit on this Device from now until stop_capture(). path
+    // given: captures to a .gputrace file at that location, openable later
+    // in Xcode. path omitted (std::nullopt): captures live to an attached
+    // Xcode debugger's GPU debugger instead (throws if none is attached).
+    // Either way requires the MTL_CAPTURE_ENABLED=1 environment variable to
+    // be set for this process -- Metal disables programmatic capture
+    // entirely otherwise, regardless of destination.
+    void start_capture(const std::optional<std::string>& path);
+
+    // Ends a capture started by start_capture() (on any Device -- this is
+    // Metal's own process-wide MTLCaptureManager, not per-Device state).
+    void stop_capture();
+
+    // Whether a capture is currently active anywhere in this process (not
+    // scoped to this Device specifically -- MTLCaptureManager is a
+    // process-wide singleton).
+    static bool is_capturing();
+
+    // A labeled begin/end marker for Xcode's GPU debugger timeline -- see
+    // CaptureScope's class doc comment. queue (default nullptr) scopes it
+    // to a secondary Queue instead of this Device's own default queue.
+    CaptureScope* create_capture_scope(const std::optional<std::string>& label, Queue* queue = nullptr);
 
     static std::vector<std::string> available_device_names();
 

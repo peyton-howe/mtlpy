@@ -1,5 +1,7 @@
 #include "device.h"
+#include "binary_archive.h"
 #include "buffer.h"
+#include "capture.h"
 #include "command_buffer.h"
 #include "event.h"
 #include "fence.h"
@@ -46,7 +48,7 @@ void run_blit(MTL::CommandQueue* queue, bool wait,
 
 } // namespace
 
-Device::Device(int index) {
+Device::Device(int index, const std::optional<std::string>& cache_path) {
     PoolGuard guard;
     if (index < 0) {
         device_ = MTL::CreateSystemDefaultDevice();
@@ -76,7 +78,7 @@ Device::Device(int index) {
         throw std::runtime_error("Failed to create Metal command queue");
     }
 
-    cache_ = new PipelineCache(device_);
+    cache_ = new PipelineCache(device_, cache_path);
 }
 
 Device::~Device() {
@@ -94,8 +96,10 @@ Heap* Device::create_heap(size_t size_bytes, uint32_t storage_mode) {
     return new Heap(device_, size_bytes, storage_mode);
 }
 
-Pipeline* Device::compile(const std::string& source, const std::string& function_name) {
-    auto cached = cache_->get_or_create(device_, source, function_name);
+Pipeline* Device::compile(const std::string& source, const std::string& function_name,
+                           BinaryArchive* archive) {
+    auto cached = cache_->get_or_create(device_, source, function_name,
+                                         archive ? archive->mtl() : nullptr);
     return new Pipeline(cached.state, queue_, cached.required_buffer_count,
                          cached.required_texture_count, cached.required_sampler_count);
 }
@@ -195,12 +199,76 @@ Fence* Device::create_fence() {
     return new Fence(device_);
 }
 
+BinaryArchive* Device::create_binary_archive(const std::optional<std::string>& path) {
+    return new BinaryArchive(device_, path.has_value() ? *path : "");
+}
+
+size_t Device::pipeline_cache_size() const {
+    return cache_->size();
+}
+
+const std::string& Device::pipeline_cache_path() const {
+    return cache_->path();
+}
+
 uint32_t Device::max_threads_per_threadgroup() const {
     return (uint32_t)device_->maxThreadsPerThreadgroup().width;
 }
 
-void Device::flush_cache() {
-    cache_->flush();
+void Device::flush_cache(const std::optional<std::string>& path) {
+    cache_->flush(path);
+}
+
+void Device::start_capture(const std::optional<std::string>& path) {
+    PoolGuard guard;
+    auto* manager = MTL::CaptureManager::sharedCaptureManager();
+
+    if (path) {
+        auto* descriptor = MTL::CaptureDescriptor::alloc()->init();
+        descriptor->setCaptureObject(device_);
+        descriptor->setDestination(MTL::CaptureDestinationGPUTraceDocument);
+        descriptor->setOutputURL(NS::URL::fileURLWithPath(
+            NS::String::string(path->c_str(), NS::UTF8StringEncoding)));
+
+        NS::Error* error = nullptr;
+        bool ok = manager->startCapture(descriptor, &error);
+        descriptor->release();
+        if (!ok)
+            throw std::runtime_error(
+                std::string("Failed to start GPU capture: ") +
+                (error ? error->localizedDescription()->utf8String() : "unknown error") +
+                " -- capturing requires the MTL_CAPTURE_ENABLED=1 environment variable "
+                "to be set for this process.");
+        return;
+    }
+
+    if (!manager->supportsDestination(MTL::CaptureDestinationDeveloperTools))
+        throw std::runtime_error(
+            "No Xcode GPU debugger is attached to capture to, and no path= was given "
+            "to capture to a .gputrace file instead -- either attach Xcode's debugger "
+            "first, or pass path=... . Either way also requires the MTL_CAPTURE_ENABLED=1 "
+            "environment variable to be set for this process.");
+    manager->startCapture(device_);
+}
+
+void Device::stop_capture() {
+    MTL::CaptureManager::sharedCaptureManager()->stopCapture();
+}
+
+bool Device::is_capturing() {
+    return MTL::CaptureManager::sharedCaptureManager()->isCapturing();
+}
+
+CaptureScope* Device::create_capture_scope(const std::optional<std::string>& label, Queue* queue) {
+    PoolGuard guard;
+    auto* manager = MTL::CaptureManager::sharedCaptureManager();
+    MTL::CaptureScope* scope = queue ? manager->newCaptureScope(queue->mtl())
+                                      : manager->newCaptureScope(device_);
+    if (!scope)
+        throw std::runtime_error("Failed to create Metal capture scope");
+    if (label)
+        scope->setLabel(NS::String::string(label->c_str(), NS::UTF8StringEncoding));
+    return new CaptureScope(scope);
 }
 
 std::vector<std::string> Device::available_device_names() {

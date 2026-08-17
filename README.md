@@ -57,6 +57,8 @@ csrc/                C++ extension (nanobind + metal-cpp)
   queue.{h,cpp}        A secondary MTL::CommandQueue (Device.queue())
   event.{h,cpp}        MTL::Event/MTL::SharedEvent wrappers (Device.event()/.shared_event())
   fence.{h,cpp}        MTL::Fence wrapper (Device.fence())
+  binary_archive.{h,cpp}  User-managed MTL::BinaryArchive (Device.binary_archive())
+  capture.{h,cpp}      MTL::CaptureScope wrapper (Device.capture_scope())
   metal_impl.mm        Single Obj-C++ translation unit providing the
                         NS::/CA::/MTL:: private implementations
   bindings.cpp         nanobind module definition (`_mtlpy`)
@@ -66,6 +68,8 @@ src/mtlpy/          Python package (src layout, for PyPI)
   texture.py             Texture, Sampler: wrap _mtlpy.Texture/_mtlpy.Sampler
   pipeline.py           Pipeline, CommandBuffer: thin wrappers over _mtlpy.Pipeline/CommandBuffer
   sync.py               Queue, Event, SharedEvent, SharedEventHandle, Fence: advanced synchronization
+  binary_archive.py     BinaryArchive: explicit user-managed pipeline archive
+  capture.py             Capture, CaptureScope: GPU frame capture
   operators.py          sqrt/cos/sin/tan/exp/log, sum/max/min/mean reductions
   shader.py             Generates Metal Shading Language source per dtype/texture type
   utils.py              NumPy dtype <-> Metal type/pixel format mapping
@@ -136,10 +140,14 @@ into it raises `ValueError` rather than silently doing nothing); see
   NumPy's always-promote-to-float64 semantics.
 - **Pipeline caching**: identical (source, function name) pairs are compiled
   once per process and reused; a binary archive on disk
-  (`~/Library/Caches/mtlpy/pipelines.metallib`) carries compiled pipelines
-  across process launches too. `Device.flush_cache()` (or using `Device` as
-  a context manager: `with mtlpy.Device() as d:`) serializes it on demand,
-  rather than only when the `Device` is garbage collected.
+  (`~/Library/Caches/mtlpy/pipelines.metallib` by default -- `Device(cache_path=...)`
+  overrides or disables this) carries compiled pipelines across process
+  launches too. `Device.flush_cache()` (or using `Device` as a context
+  manager: `with mtlpy.Device() as d:`) serializes it on demand, rather than
+  only when the `Device` is garbage collected. `Device.binary_archive()` +
+  `Device.compile(..., archive=...)` additionally give you an explicit,
+  user-managed `MTL::BinaryArchive` on top of that implicit cache -- see
+  [Binary archives](#binary-archives) below.
 - **Async dispatch**: `wait=False` commits work without blocking; Metal
   retires command buffers on a queue in commit order, so a later `wait=True`
   dispatch that reads the result is enough to synchronize (see
@@ -159,6 +167,11 @@ into it raises `ValueError` rather than silently doing nothing); see
 - **Multi-GPU support**: `mtlpy.list_devices()` lists every Metal-capable GPU
   on the machine; `mtlpy.Device(index=...)` selects one (the default targets
   the system default GPU).
+- **GPU frame capture**: `Device.start_capture()`/`.stop_capture()` and
+  `Device.capture_scope()` drive Metal's programmatic GPU capture
+  (`MTLCaptureManager`/`MTLCaptureScope`) from Python -- capture straight to
+  a `.gputrace` file openable in Xcode, no attached debugger required -- see
+  [GPU frame capture](#gpu-frame-capture) below.
 - **Errors as exceptions**: shader compile failures, missing kernel
   functions, mismatched buffer counts, mismatched-`Device` operands, and GPU
   execution errors all raise Python exceptions with a clear message, instead
@@ -660,6 +673,102 @@ needed. `Fence` is exposed as a lower-level, explicit tool for orderings
 that aren't implied by resource usage alone. For ordering across
 *different* queues, use `Event`/`SharedEvent` instead -- `Fence`'s guarantee
 is scoped to a single queue.
+
+## Binary archives
+
+Every `Device` already compiles-once-and-reuses identical (source, function
+name) pairs, backed by an implicit on-disk `MTL::BinaryArchive`
+(`~/Library/Caches/mtlpy/pipelines.metallib`) that carries compiled
+pipelines across process launches too (see [Pipeline caching](#features)
+above) -- this needs no setup and is what every example elsewhere in this
+README already benefits from. Two things it doesn't cover: choosing *where*
+that cache lives (or turning it off), and building a read-only archive
+meant to ship as an asset with an app rather than accumulate in a per-user
+cache directory. `Device(cache_path=...)` covers the first; `Device.binary_archive()`
+covers the second.
+
+### Controlling the implicit cache's location
+
+```python
+device = mtlpy.Device(cache_path="/custom/path/pipelines.metallib")
+device.pipeline_cache_path   # "/custom/path/pipelines.metallib"
+device.pipeline_cache_size   # number of pipelines currently cached in memory
+
+device = mtlpy.Device(cache_path=False)   # disable on-disk caching entirely
+device.pipeline_cache_path   # ""  -- still deduped in memory for this process
+```
+
+`Device.flush_cache(path=...)` accepts the same kind of override for a
+single call, without changing where future `flush_cache()` calls (or
+garbage collection) write to.
+
+### A second, explicit archive: `Device.binary_archive()`
+
+```python
+archive = device.binary_archive("build/kernels.metallib")
+pipeline = device.compile(source, "my_kernel", archive=archive)
+archive.save()   # writes build/kernels.metallib now, not at some later flush
+```
+
+`archive=` registers the compiled pipeline into `archive` *in addition to*
+the Device's own implicit cache, which always happens regardless -- and it
+does so even when `compile()` hits that implicit cache's in-memory dedup
+(an identical (source, function name) pair compiled earlier on this same
+`Device`, with no `archive=` that first time): the already-compiled
+`MTL::Function` is reused to register into `archive`, no shader
+recompilation needed. A `Device.binary_archive(path)` call for a `path`
+that already exists opens and parses it; a `path` that doesn't exist yet
+(or no `path` at all) starts a fresh, empty archive instead.
+
+The build-once-ship-as-an-asset workflow this unlocks: compile every kernel
+your app uses against one `BinaryArchive` during a build/CI step, `.save()`
+it, then bundle the resulting file with your app. At runtime,
+`Device.binary_archive(path=bundled_path)` + `Device.compile(..., archive=that_archive)`
+for each kernel gets Metal's pipeline-state creation a precompiled binary to
+match against instead of JIT-compiling from source on a user's machine for
+the first time -- the same win the implicit per-user cache gives you across
+*your own* repeated runs, extended to a fresh install that's never run
+before.
+
+## GPU frame capture
+
+`Device.start_capture()`/`.stop_capture()` and `Device.capture_scope()` wrap
+Metal's `MTLCaptureManager`/`MTLCaptureScope` -- the same GPU frame capture
+Xcode's own "Capture GPU Frame" button drives, but triggered directly from
+Python:
+
+```python
+with device.start_capture("trace.gputrace"):
+    with device.capture_scope("Blur pass"):
+        blur_pipeline.run(bufs, grid)
+    with device.capture_scope("Sharpen pass"):
+        sharpen_pipeline.run(bufs2, grid2)
+```
+
+Open the resulting `trace.gputrace` in Xcode (`File > Open`, or just
+double-click it in Finder) to inspect every encoded command, resource
+binding, and GPU timing from that capture -- `capture_scope()`'s labels show
+up as named regions in Xcode's capture timeline, letting you jump straight
+to a specific pass instead of scrolling through the whole trace. Omit the
+`path` (`device.start_capture()`) to instead capture live to an attached
+Xcode debugger's own GPU debugger, if one is attached -- raises otherwise.
+`device.stop_capture()` works the same as letting the `with` block exit;
+the return value from `start_capture()` is purely optional context-manager
+sugar for that call.
+
+Either destination requires the `MTL_CAPTURE_ENABLED=1` environment
+variable to be set for the process *before Metal's framework first
+initializes* (i.e. before creating any `Device`) -- Metal conditionally
+loads its capture-layer instrumentation at that point and won't retroactively
+insert it later in the same process, even into a `Device` created afterward.
+Run your script as `MTL_CAPTURE_ENABLED=1 python your_script.py` (or set it
+in your shell/launch config) to enable capturing.
+
+`capture_scope()`'s `begin()`/`end()` (or its context manager) are harmless
+no-ops when nothing is actually capturing -- Metal only records scope
+boundaries while a capture is in progress, so sprinkling scopes through your
+code doesn't require gating them behind whether a capture happens to be
+active.
 
 ## Testing
 

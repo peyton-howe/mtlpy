@@ -7,7 +7,9 @@
 #include <string>
 #include <vector>
 #include "device.h"
+#include "binary_archive.h"
 #include "buffer.h"
+#include "capture.h"
 #include "command_buffer.h"
 #include "dlpack.h"
 #include "event.h"
@@ -27,17 +29,38 @@ NB_MODULE(_mtlpy, m) {
     m.def("list_devices", &Device::available_device_names);
 
     nb::class_<Device>(m, "Device")
-        .def(nb::init<int>(), nb::arg("index") = -1)
+        .def(nb::init<int, std::optional<std::string>>(),
+             nb::arg("index") = -1, nb::arg("cache_path") = std::nullopt)
         .def("create_buffer", &Device::create_buffer,
              nb::arg("size_bytes"), nb::arg("storage_mode"),
              nb::rv_policy::take_ownership,
              nb::keep_alive<0, 1>())   // keep Device alive while Buffer is alive
         .def("compile", &Device::compile,
-             nb::arg("source"), nb::arg("function_name"),
+             nb::arg("source"), nb::arg("function_name"), nb::arg("archive") = nullptr,
              nb::rv_policy::take_ownership,
              nb::keep_alive<0, 1>())   // keep Device alive while Pipeline is alive
         .def("max_threads_per_threadgroup", &Device::max_threads_per_threadgroup)
-        .def("flush_cache", &Device::flush_cache)
+        .def("flush_cache", &Device::flush_cache, nb::arg("path") = std::nullopt)
+        .def("create_binary_archive", &Device::create_binary_archive,
+             nb::arg("path"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>())   // keep Device alive while BinaryArchive is alive
+        .def_prop_ro("pipeline_cache_size", &Device::pipeline_cache_size)
+        .def_prop_ro("pipeline_cache_path", &Device::pipeline_cache_path)
+        .def("start_capture", &Device::start_capture, nb::arg("path") = std::nullopt)
+        .def("stop_capture", &Device::stop_capture)
+        // is_capturing() is a static method (MTLCaptureManager is a
+        // process-wide singleton, not per-Device) -- def_static keeps it
+        // callable both as Device.is_capturing() and off an instance
+        // (self._dev.is_capturing()), the same as a Python staticmethod.
+        .def_static("is_capturing", &Device::is_capturing)
+        .def("create_capture_scope", &Device::create_capture_scope,
+             nb::arg("label"), nb::arg("queue") = nullptr,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>(),   // keep Device alive while CaptureScope is alive
+             nb::keep_alive<0, 3>())   // ...and queue too, if given (same MTLResource-vs-not
+                                       // rationale as CommandBuffer::encode_wait_for_event's
+                                       // keep_alive, see above)
         .def_prop_ro("mtl_ptr", [](const Device& d) {
             // The id<MTLDevice> handle itself -- raw, non-owning (this
             // Device's destructor still owns the real release()). For
@@ -81,7 +104,11 @@ NB_MODULE(_mtlpy, m) {
         .def("create_command_buffer", &Device::create_command_buffer,
              nb::arg("queue") = nullptr,
              nb::rv_policy::take_ownership,
-             nb::keep_alive<0, 1>())   // keep Device alive while CommandBuffer is alive
+             nb::keep_alive<0, 1>(),   // keep Device alive while CommandBuffer is alive
+             nb::keep_alive<0, 2>())   // ...and queue too, if given -- the returned
+                                       // CommandBuffer's cmd_ is tied to queue's
+                                       // MTL::CommandQueue for its whole lifetime,
+                                       // same rationale as create_capture_scope's below
         .def("create_heap", &Device::create_heap,
              nb::arg("size_bytes"), nb::arg("storage_mode"),
              nb::rv_policy::take_ownership,
@@ -191,6 +218,13 @@ NB_MODULE(_mtlpy, m) {
             }
             return nb::steal<nb::object>(capsule);
         }, nb::arg("dtype_code"), nb::arg("dtype_bits"), nb::arg("shape"));
+
+    nb::class_<BinaryArchive>(m, "BinaryArchive")
+        .def("save", &BinaryArchive::save, nb::arg("path") = "");
+
+    nb::class_<CaptureScope>(m, "CaptureScope")
+        .def("begin_scope", &CaptureScope::begin_scope)
+        .def("end_scope", &CaptureScope::end_scope);
 
     nb::class_<Heap>(m, "Heap")
         .def("new_buffer", &Heap::new_buffer,

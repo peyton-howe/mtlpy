@@ -43,6 +43,69 @@ def test_many_short_lived_devices():
         del dev  # triggers PipelineCache::~PipelineCache() -> archive serialize
 
 
+def test_device_freed_deterministically_after_texture_upload():
+    """Device._staging_buffer() (backing Texture.upload()/.download()'s
+    defaults -- see Device.texture()) lazily caches a Heap as
+    Device._staging_heap. Heap holds a reference back to its owning Device
+    (needed for staging non-Shared writes) -- if that were a plain strong
+    reference, it would close a cycle (Device -> _staging_heap -> Heap ->
+    Device) that CPython's refcounting alone can never break, contradicting
+    this library's usual instant-on-last-ref teardown (see e.g.
+    Heap.used_size's docstring) and deferring the underlying MTL::Device's
+    release to whenever CPython's cyclic collector happens to run -- which,
+    with gc disabled below, is never. This is a *weakref* import away from
+    always failing outside a test that happens to trigger a gc pass."""
+    import gc
+    import weakref
+
+    from mtlpy import Device
+
+    gc.disable()
+    try:
+        dev = Device()
+        tex = dev.texture(np.zeros((4, 4), dtype=np.float32), "r32Float")
+        del tex  # only Device._staging_heap references anything now
+
+        ref = weakref.ref(dev)
+        del dev
+        assert ref() is None, (
+            "Device was not freed by plain refcounting alone after a texture "
+            "upload -- Heap._device (or similar) is holding a strong reference "
+            "back to Device, closing a reference cycle"
+        )
+    finally:
+        gc.enable()
+
+
+def test_device_freed_deterministically_after_buffer_from_texture():
+    """Same issue as test_device_freed_deterministically_after_texture_upload,
+    for Device._texture_to_buffer_pipelines (backing buffer_from_texture()):
+    a cached Pipeline holding a strong reference back to its owning Device
+    would close a Device -> that cache -> Pipeline -> Device cycle the same
+    way."""
+    import gc
+    import weakref
+
+    from mtlpy import Device
+
+    gc.disable()
+    try:
+        dev = Device()
+        tex = dev.texture(np.zeros((4, 4), dtype=np.float32), "r32Float")
+        out = dev.buffer_from_texture(tex)
+        del tex, out
+
+        ref = weakref.ref(dev)
+        del dev
+        assert ref() is None, (
+            "Device was not freed by plain refcounting alone after "
+            "buffer_from_texture() -- Pipeline._device (or similar) is "
+            "holding a strong reference back to Device, closing a reference cycle"
+        )
+    finally:
+        gc.enable()
+
+
 def test_buffer_outlives_local_python_refs(device):
     """Buffer.contents returns a view holding an _mtlpy_buf backref so the
     Buffer (and therefore the Device) stays alive as long as the array does

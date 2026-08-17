@@ -13,7 +13,14 @@ Event::Event(MTL::Device* device) {
 
 Event::~Event() {
     PoolGuard guard;
-    event_->release();
+    // event_ can be null here: SharedEvent's constructors delegate to
+    // Event(static_cast<MTL::Event*>(nullptr)) before device->newSharedEvent()
+    // runs, so if that call fails and SharedEvent's constructor throws, this
+    // already-constructed Event base subobject is unwound with event_ still
+    // null -- guard explicitly rather than relying on release() being a
+    // harmless nil-message-send.
+    if (event_)
+        event_->release();
 }
 
 SharedEventHandle::SharedEventHandle(MTL::SharedEventHandle* handle)

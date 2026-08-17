@@ -1,4 +1,5 @@
 from __future__ import annotations
+import weakref
 import numpy as np
 from .buffer import Buffer
 from .texture import Texture
@@ -57,7 +58,20 @@ class Heap:
     def __init__(self, _heap, storage: StorageMode, device):
         self._heap   = _heap    # _mtlpy.Heap
         self.storage = StorageMode(storage)
-        self._device = device   # Python Device (needed for staging non-Shared writes)
+        # weakref, not a plain strong reference: Device._staging_buffer()
+        # (backing Texture.upload()/.download()'s defaults) caches its
+        # lazily-grown Heap as Device._staging_heap -- a strong Heap ->
+        # Device reference here would close a cycle (Device -> _staging_heap
+        # -> Heap -> Device) that pure refcounting can never break on its
+        # own, same issue and same fix as Pipeline._device_ref in pipeline.py
+        # (see its comment for the full story -- confirmed by testing there,
+        # and this exact Heap path is what actually reproduces it from
+        # something as ordinary as Device.texture(data, pixel_format)).
+        self._device_ref = weakref.ref(device)  # needed for staging non-Shared writes
+
+    @property
+    def _device(self):
+        return self._device_ref()
 
     @property
     def size(self) -> int:
