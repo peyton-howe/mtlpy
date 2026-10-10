@@ -34,6 +34,7 @@ nanobind_add_module(_mtlpy
     csrc/fence.cpp
     csrc/binary_archive.cpp
     csrc/capture.cpp
+    csrc/surface.mm
     csrc/bindings.cpp
 )
 
@@ -46,6 +47,12 @@ target_link_libraries(_mtlpy PRIVATE
     "-framework Metal"
     "-framework Foundation"
     "-framework QuartzCore"
+    "-framework CoreGraphics"
+    "-framework AppKit"
 )
+
+# surface.mm is the one Objective-C (not metal-cpp) translation unit -- it
+# holds CAMetalLayer/NSView objects, so let ARC manage them.
+set_source_files_properties(csrc/surface.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 install(TARGETS _mtlpy LIBRARY DESTINATION mtlpy)

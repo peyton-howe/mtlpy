@@ -35,6 +35,7 @@ Issues = "https://github.com/peyton-howe/mtlpy/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+qt = ["PySide6>=6.5"]
 
 [tool.scikit-build]
 wheel.packages = ["src/mtlpy"]

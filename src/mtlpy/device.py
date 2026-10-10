@@ -6,6 +6,7 @@ from .capture import Capture, CaptureScope
 from .heap import Heap
 from .pipeline import CommandBuffer, Pipeline
 from .sync import Event, Fence, Queue, SharedEvent, SharedEventHandle
+from .surface import Surface
 from .texture import Sampler, Texture
 from . import utils, shader
 from .utils import StorageMode, TEXTURE_USAGE_SHADER_READ, TEXTURE_USAGE_SHADER_WRITE
@@ -600,3 +601,10 @@ class Device:
     @property
     def max_threads_per_threadgroup(self) -> int:
         return self._dev.max_threads_per_threadgroup()
+
+    def surface(self, view_ptr: int, **kwargs) -> Surface:
+        """A Surface displaying this Device's Textures in the NSView at
+        view_ptr (e.g. int(qwidget.winId())). Main thread only. kwargs are
+        Surface's options (pixel_format, colorspace, scaling, ...) -- see
+        Surface. For PySide6, mtlpy.qt.MetalWidget wraps this."""
+        return Surface(self, view_ptr, **kwargs)
