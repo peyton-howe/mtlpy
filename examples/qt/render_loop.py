@@ -9,7 +9,8 @@ Nothing waits on the GPU: the kernel and the present both go to the
 Device's default queue (so the present is ordered after the kernel), and
 with vsync on (the default) next_frame() paces the loop to the display.
 
-Requires PySide6:  pip install "mtlpy[qt]"
+Requires PySide6 (pip install PySide6). Uses metal_widget.py from this
+directory -- run from anywhere: python examples/qt/render_loop.py
 """
 import time
 
@@ -18,7 +19,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 import mtlpy
-from mtlpy.qt import MetalWidget
+from metal_widget import MetalWidget  # examples/qt/metal_widget.py
 
 source = """
 #include <metal_stdlib>

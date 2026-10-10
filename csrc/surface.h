@@ -37,7 +37,7 @@ private:
 };
 
 // Displays mtlpy Textures in a native window via a CAMetalLayer -- e.g. a
-// PySide6 QWidget (see src/mtlpy/qt.py), whose winId() is its NSView*.
+// PySide6 QWidget (see examples/qt/metal_widget.py), whose winId() is its NSView*.
 //
 // The layer is added as a *sublayer* of the view's own backing layer rather
 // than replacing it, so toolkits like Qt that manage their NSView's backing

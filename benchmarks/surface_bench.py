@@ -10,11 +10,14 @@ each present adds on top (Surface.last_present_gpu_time).
     python benchmarks/surface_bench.py
 """
 import statistics
+import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
 import mtlpy
-from mtlpy.qt import MetalWidget
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "qt"))
+from metal_widget import MetalWidget  # noqa: E402
 
 FRAMES = 200
 SIZES = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]

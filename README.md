@@ -676,19 +676,17 @@ is scoped to a single queue.
 
 ## Displaying textures in a window (PySide6)
 
-`mtlpy.qt.MetalWidget` is a `QWidget` backed by a `CAMetalLayer`. Kernels can
-render **straight into the window's drawable**: no intermediate texture, no
-copy pass, and no CPU round-trip.
-
-```bash
-pip install "mtlpy[qt]"
-```
+`mtlpy.Surface` attaches a `CAMetalLayer` to any `NSView`. Kernels can render
+**straight into the window's drawable**: no intermediate texture, no copy
+pass, and no CPU round-trip. mtlpy itself has no Qt dependency.
+[`examples/qt/metal_widget.py`](examples/qt/metal_widget.py) is a small PySide6
+`QWidget` around `Surface`; copy it into your project and adapt it as needed:
 
 ```python
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 import mtlpy
-from mtlpy.qt import MetalWidget
+from metal_widget import MetalWidget   # examples/qt/metal_widget.py
 
 app = QApplication([])
 device = mtlpy.Device()
@@ -737,8 +735,8 @@ the widget: `scaling="aspect"` (letterboxed, default), `"fill"`, `"stretch"`
 or `"center"`, with `filter="linear"` or `"nearest"`. Integer formats have to
 be converted first.
 
-What the copy costs, in GPU time (`benchmarks/surface_bench.py`). A trivial
-fill kernel stands in for your work:
+What the copy costs, in GPU time (`benchmarks/surface_bench.py`, Apple M4
+Pro). A trivial fill kernel stands in for your work:
 
 | Resolution | Fill kernel | `present(texture)` pass | `present(frame)` |
 |---|---|---|---|
@@ -763,9 +761,13 @@ fill kernel stands in for your work:
   `"extended_linear_srgb"`, `None`), `edr`, `display_sync` (vsync),
   `max_drawables` (2 or 3).
 
-Other toolkits: `device.surface(view_ptr)` takes any `NSView*` and returns the
-same `Surface` object. See `examples/qt_surface.py` for a complete animated
-zero-copy example.
+Without the example widget: `device.surface(int(widget.winId()))` takes any
+`NSView*`, so other toolkits work the same way. Examples:
+
+- `examples/qt/render_loop.py`: an animated zero-copy render loop.
+- `examples/qt/orientation.py`: a test card (text, an arrow, a color per
+  corner) shown through both paths, for checking orientation and channel
+  order by eye.
 
 ## Binary archives
 
@@ -885,10 +887,10 @@ pytest tests/
   (regression coverage for the Metal object-ownership rules in `csrc/`),
   plus multi-threaded dispatch/compilation tests (`Pipeline.run` releases
   the GIL, so this exercises genuinely concurrent Metal calls).
-- `test_surface.py` — `Surface`/`MetalWidget` zero-copy (`next_frame`) and
+- `test_surface.py` — `Surface` zero-copy (`next_frame`) and
   copy (`present(texture)`) presentation across texture and drawable formats,
   resize, queue/event ordering, drawable-pool recycling, and lifetime
-  (skipped without PySide6).
+  through `examples/qt/metal_widget.py` (skipped without PySide6).
 - `test_pipeline_persistence.py` — spawns separate processes to verify the
   on-disk pipeline binary archive is actually written and read back, and
   that `Device.flush_cache()` writes it on demand.

@@ -94,8 +94,9 @@ class Frame:
 class Surface:
     """Displays Textures in a native macOS view through a CAMetalLayer.
 
-    Usually created via mtlpy.qt.MetalWidget for PySide6, or directly with
-    Device.surface(view_ptr) given any NSView* (e.g. int(widget.winId())).
+    Created with Device.surface(view_ptr) from any NSView* -- e.g.
+    int(widget.winId()) of a native PySide6 QWidget; examples/qt/metal_widget.py
+    is a ready-made QWidget around it.
 
         surface = device.surface(int(widget.winId()))
         pipeline.run([], grid=(w, h, 1), textures=[tex])   # no wait needed

@@ -606,5 +606,5 @@ class Device:
         """A Surface displaying this Device's Textures in the NSView at
         view_ptr (e.g. int(qwidget.winId())). Main thread only. kwargs are
         Surface's options (pixel_format, colorspace, scaling, ...) -- see
-        Surface. For PySide6, mtlpy.qt.MetalWidget wraps this."""
+        Surface. For PySide6, see examples/qt/metal_widget.py."""
         return Surface(self, view_ptr, **kwargs)

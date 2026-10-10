@@ -1,7 +1,12 @@
-"""PySide6 integration: a QWidget that displays mtlpy Textures.
+"""A PySide6 QWidget that displays mtlpy Textures via mtlpy.Surface.
+
+Example code, not part of the mtlpy package -- copy it into your project
+(or import it from here, as the other Qt examples do) and adapt as needed.
+It's the Qt-specific glue around Surface: a native child NSView, no Qt
+painting, and keeping the layer in sync on resize / screen change.
 
     from PySide6.QtWidgets import QApplication
-    from mtlpy.qt import MetalWidget
+    from metal_widget import MetalWidget
 
     app = QApplication([])
     view = MetalWidget(device)
@@ -10,23 +15,18 @@
     ...
     view.present(tex)        # e.g. from a QTimer callback
 
-Not imported by `import mtlpy` -- PySide6 is an optional dependency
-(pip install "mtlpy[qt]").
+Requires PySide6 (pip install PySide6).
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-try:
-    from PySide6.QtCore import QEvent, Qt
-    from PySide6.QtWidgets import QWidget
-except ImportError as e:  # pragma: no cover
-    raise ImportError(
-        "mtlpy.qt requires PySide6 -- pip install 'mtlpy[qt]'") from e
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtWidgets import QWidget
+
+from mtlpy import Frame
 
 if TYPE_CHECKING:
-    from .device import Device
-    from .surface import Frame, Surface
-    from .texture import Texture
+    from mtlpy import Device, Surface, Texture
 
 # Events after which the layer's frame/backing scale may be stale.
 _LAYOUT_EVENTS = {QEvent.Type.Show, QEvent.Type.ScreenChangeInternal}
@@ -85,7 +85,6 @@ class MetalWidget(QWidget):
     def present(self, source: Texture | Frame, **kwargs) -> bool:
         """Surface.present(source, **kwargs). A Texture is skipped (returns
         False) while the widget isn't visible; a Frame is always presented."""
-        from .surface import Frame
         if not isinstance(source, Frame) and not self.isVisible():
             return False
         return self._surface.present(source, **kwargs)

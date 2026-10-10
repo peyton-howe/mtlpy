@@ -1,8 +1,12 @@
-"""Surface / CAMetalLayer presentation, via PySide6's MetalWidget.
+"""Surface / CAMetalLayer presentation, via examples/qt/metal_widget.py's
+PySide6 MetalWidget (so the example is exercised too).
 
 Skipped when PySide6 isn't installed. Needs a GUI session (a window server),
 which local macOS runs and GitHub's macOS runners both have.
 """
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -12,7 +16,8 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from mtlpy.qt import MetalWidget  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "qt"))
+from metal_widget import MetalWidget  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -372,3 +377,26 @@ def test_last_present_gpu_time(widget, device, fill):
     widget.present(widget.next_frame(), wait=True)
     # Relative, not an absolute threshold -- GPU timings vary run to run.
     assert widget.surface.last_present_gpu_time < copy_time
+
+
+def test_zero_copy_frame_layout(widget, device):
+    # A kernel writing RGBA red into the top-left quadrant must land in the
+    # drawable as row 0 = top and BGRA byte order -- what Core Animation
+    # composites. (The on-screen result is checked by eye with
+    # examples/qt/orientation.py.)
+    k = device.compile("""
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void top_left(texture2d<float, access::write> t [[texture(0)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+            bool tl = gid.x < t.get_width() / 2 && gid.y < t.get_height() / 2;
+            t.write(tl ? float4(1, 0, 0, 1) : float4(0, 0, 0, 1), gid);
+        }""", "top_left")
+    frame = widget.next_frame((64, 32))
+    k.run([], grid=(64, 32, 1), textures=[frame.texture])
+    px = frame.texture.download()          # (H, W, 4) in BGRA memory order
+    widget.present(frame)
+    assert px.shape == (32, 64, 4)
+    assert px[0, 0].tolist() == [0, 0, 255, 255]     # top-left: red, as B,G,R,A
+    assert px[-1, -1].tolist() == [0, 0, 0, 255]     # bottom-right: black
+    assert px[0, -1].tolist() == [0, 0, 0, 255]      # top-right: black
