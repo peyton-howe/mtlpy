@@ -5,6 +5,8 @@ Skipped when PySide6 isn't installed. Needs a GUI session (a window server),
 which local macOS runs and GitHub's macOS runners both have.
 """
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 import numpy as np
@@ -91,11 +93,50 @@ def test_present_after_kernel_no_wait(widget, device):
     assert widget.present(tex, wait=True)
 
 
-def test_present_waits_for_event(widget, device):
+def _pending_producer(device):
     ev = device.shared_event()
-    ev.signal(1)
+    result = device.buffer(np.zeros(1, dtype=np.uint32))
+    marker = device.compile("""
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void mark(device uint* result [[buffer(0)]]) {
+            result[0] = 42;
+        }""", "mark")
+    producer = device.command_buffer(queue=device.queue())
+    marker.run([result], 1, cb=producer)
+    return producer, ev, result
+
+
+def _present_waiting_for_producer(widget, source, producer, ev):
+    started = threading.Event()
+
+    def present():
+        assert ev.signaled_value == 0
+        started.set()
+        return widget.present(source, wait=True, wait_for=(ev, 1))
+
+    # Submit the producer only after presentation has started with a pending
+    # event. A missing GPU wait must not pass just because the producer won
+    # a scheduling race or a readback later synchronized the default queue.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(present)
+        try:
+            assert started.wait(timeout=5)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.1)
+        finally:
+            producer.commit(wait=False)
+        assert pending.result(timeout=5)
+        assert ev.signaled_value == 1
+
+
+def test_present_waits_for_event(widget, device, fill):
     tex = device.texture(_rgba(), "rgba8Unorm")
-    assert widget.present(tex, wait=True, wait_for=(ev, 1))
+    producer, ev, result = _pending_producer(device)
+    fill.run([], grid=(tex.width, tex.height, 1), textures=[tex], cb=producer)
+    producer.signal_event(ev, 1)
+    _present_waiting_for_producer(widget, tex, producer, ev)
+    assert result.contents[0] == 42
 
 
 def test_private_texture(widget, device):
@@ -106,6 +147,28 @@ def test_private_texture(widget, device):
 def test_present_while_hidden_skips(widget, device):
     widget.hide()
     assert widget.present(device.texture(_rgba(), "rgba8Unorm")) is False
+
+
+def test_render_thread_visibility(app, widget, device, monkeypatch):
+    tex = device.texture(_rgba(), "rgba8Unorm")
+
+    def reject_visibility_query():
+        pytest.fail("render methods must not query QWidget visibility")
+
+    monkeypatch.setattr(widget, "isVisible", reject_visibility_query)
+
+    def render(visible):
+        assert widget.present(tex, wait=True) is visible
+        frame = widget.next_frame()
+        assert (frame is not None) is visible
+        if frame is not None:
+            assert widget.present(frame, wait=True)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for visible in (True, False, True):
+            widget.setVisible(visible)
+            app.processEvents()
+            executor.submit(render, visible).result(timeout=5)
 
 
 def test_resize_keeps_presenting(app, widget, device):
@@ -305,12 +368,14 @@ def test_frame_from_other_surface(app, device, widget):
         _destroy(app, other)
 
 
-def test_zero_copy_waits_for_event(widget, fill):
-    ev = widget.surface._device.shared_event()
+def test_zero_copy_waits_for_event(widget, device, fill):
     frame = widget.next_frame()
-    fill.run([], grid=(frame.width, frame.height, 1), textures=[frame.texture], wait=False)
-    ev.signal(1)
-    assert widget.present(frame, wait=True, wait_for=(ev, 1))
+    producer, ev, result = _pending_producer(device)
+    fill.run([], grid=(frame.width, frame.height, 1), textures=[frame.texture], cb=producer)
+    producer.signal_event(ev, 1)
+    _present_waiting_for_producer(widget, frame, producer, ev)
+    assert result.contents[0] == 42
+    assert frame.presented
 
 
 def test_zero_copy_mixed_with_texture_present(widget, device, fill):

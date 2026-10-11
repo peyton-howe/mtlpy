@@ -18,6 +18,7 @@ painting, and keeping the layer in sync on resize / screen change.
 Requires PySide6 (pip install PySide6).
 """
 from __future__ import annotations
+from threading import Event
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, Qt
@@ -61,6 +62,8 @@ class MetalWidget(QWidget):
     CAMetalLayer's 1s nextDrawable stall."""
 
     def __init__(self, device: Device, parent: QWidget | None = None, **surface_options):
+        # Updated by GUI events; render threads must not query QWidget state.
+        self._visible = Event()
         super().__init__(parent)
         # Own NSView (winId() of a non-native child would be the window's),
         # and no Qt raster painting/background fill underneath the layer.
@@ -78,18 +81,26 @@ class MetalWidget(QWidget):
         """Surface.next_frame(size) -- zero-copy: render into the returned
         frame.texture, then present(frame). None (skip the frame) while the
         widget isn't visible."""
-        if not self.isVisible():
+        if not self._visible.is_set():
             return None
         return self._surface.next_frame(size)
 
     def present(self, source: Texture | Frame, **kwargs) -> bool:
         """Surface.present(source, **kwargs). A Texture is skipped (returns
         False) while the widget isn't visible; a Frame is always presented."""
-        if not isinstance(source, Frame) and not self.isVisible():
+        if not isinstance(source, Frame) and not self._visible.is_set():
             return False
         return self._surface.present(source, **kwargs)
 
     # -- Qt overrides ---------------------------------------------------
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._visible.set()
+
+    def hideEvent(self, event) -> None:
+        self._visible.clear()
+        super().hideEvent(event)
 
     def paintEngine(self):
         return None  # with WA_PaintOnScreen: Qt never paints this widget

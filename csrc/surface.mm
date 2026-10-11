@@ -9,6 +9,7 @@
 #include "event.h"
 #include "texture.h"
 #include <atomic>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -141,11 +142,15 @@ std::string ns_error_message(NSError* err) {
 }
 
 void commit(id<MTLCommandBuffer> cmd, bool wait, const char* what,
-            std::shared_ptr<std::atomic<double>> gpu_time) {
+            std::shared_ptr<std::atomic<double>> gpu_time, Event* wait_event) {
+    // Encoded event waits do not retain the event. Keep a strong reference
+    // in the completion block even when the Python caller drops its event.
+    __block id<MTLEvent> retained_event = wait_event ? (__bridge id<MTLEvent>)wait_event->mtl() : nil;
     // shared_ptr, not a pointer into Surface: the handler can run after
     // the Surface is gone.
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> cb) {
         gpu_time->store(cb.GPUEndTime - cb.GPUStartTime, std::memory_order_relaxed);
+        retained_event = nil;
     }];
     [cmd commit];
     if (wait) {
@@ -168,6 +173,7 @@ CGSize view_pixel_size(NSView* view) {
 } // namespace
 
 struct Surface::Impl {
+    std::mutex                mutex;
     CAMetalLayer*              layer = nil;
     // Weak: the toolkit (e.g. Qt) owns the view and may destroy it before
     // this Surface -- we only need it again for update_layout().
@@ -297,6 +303,7 @@ Surface::~Surface() {
 }
 
 void Surface::close() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->closed) return;
     @autoreleasepool {
         detach_layer(impl_->layer);
@@ -307,9 +314,13 @@ void Surface::close() {
     }
 }
 
-bool Surface::closed() const { return impl_->closed; }
+bool Surface::closed() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->closed;
+}
 
 void Surface::update_layout() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->closed) return;
     if (![NSThread isMainThread])
         throw std::runtime_error("Surface.update_layout: must be called on the main thread");
@@ -334,16 +345,27 @@ uint32_t Surface::view_width() const  { return impl_->view_w; }
 uint32_t Surface::view_height() const { return impl_->view_h; }
 
 uint32_t Surface::drawable_width() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->layer ? (uint32_t)impl_->layer.drawableSize.width : 0;
 }
 
 uint32_t Surface::drawable_height() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->layer ? (uint32_t)impl_->layer.drawableSize.height : 0;
 }
 
 bool Surface::present(Texture* src, bool wait, Event* wait_event, uint64_t wait_value) {
-    if (impl_->closed)
-        throw std::runtime_error("Surface.present: surface is closed");
+    // Snapshot strong references so close() can tear down without waiting
+    // for nextDrawable or GPU completion on a render thread.
+    CAMetalLayer* layer;
+    id<MTLRenderPipelineState> pipeline;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (impl_->closed)
+            throw std::runtime_error("Surface.present: surface is closed");
+        layer = impl_->layer;
+        pipeline = impl_->pipeline;
+    }
     if (!src)
         throw std::invalid_argument("Surface.present: null texture");
 
@@ -360,7 +382,6 @@ bool Surface::present(Texture* src, bool wait, Event* wait_event, uint64_t wait_
                 "Surface.present: integer textures can't be displayed directly -- "
                 "convert to a normalized or float format first");
 
-        CAMetalLayer* layer = impl_->layer;
         CGSize size = CGSizeMake(tex.width, tex.height);
         if (!CGSizeEqualToSize(layer.drawableSize, size))
             layer.drawableSize = size;
@@ -385,19 +406,20 @@ bool Surface::present(Texture* src, bool wait, Event* wait_event, uint64_t wait_
 
         uint32_t mode = mode_for(tex.pixelFormat);
         id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rp];
-        [enc setRenderPipelineState:impl_->pipeline];
+        [enc setRenderPipelineState:pipeline];
         [enc setFragmentTexture:tex atIndex:0];
         [enc setFragmentBytes:&mode length:sizeof(mode) atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
 
         [cmd presentDrawable:drawable];
-        commit(cmd, wait, "Surface.present", impl_->gpu_time);
+        commit(cmd, wait, "Surface.present", impl_->gpu_time, wait_event);
         return true;
     }
 }
 
 Frame* Surface::next_frame(uint32_t width, uint32_t height) {
+    std::unique_lock<std::mutex> lock(impl_->mutex);
     if (impl_->closed)
         throw std::runtime_error("Surface.next_frame: surface is closed");
     if ((width == 0) != (height == 0))
@@ -427,6 +449,7 @@ Frame* Surface::next_frame(uint32_t width, uint32_t height) {
         if (!CGSizeEqualToSize(layer.drawableSize, size))
             layer.drawableSize = size;
 
+        lock.unlock();  // layer stays alive if close() runs while acquiring
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (!drawable)
             return nullptr;
@@ -437,7 +460,7 @@ Frame* Surface::next_frame(uint32_t width, uint32_t height) {
 }
 
 void Surface::present_frame(Frame* frame, bool wait, Event* wait_event, uint64_t wait_value) {
-    if (impl_->closed)
+    if (closed())
         throw std::runtime_error("Surface.present: surface is closed");
     if (!frame)
         throw std::invalid_argument("Surface.present: null frame");
@@ -455,7 +478,7 @@ void Surface::present_frame(Frame* frame, bool wait, Event* wait_event, uint64_t
             [cmd encodeWaitForEvent:(__bridge id<MTLEvent>)wait_event->mtl() value:wait_value];
         [cmd presentDrawable:frame->impl_->drawable];
         frame->impl_->presented = true;
-        commit(cmd, wait, "Surface.present", impl_->gpu_time);
+        commit(cmd, wait, "Surface.present", impl_->gpu_time, wait_event);
     }
 }
 

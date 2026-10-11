@@ -38,6 +38,8 @@ def measure(view, fill, w, h, zero_copy, tex=None):
     for i in range(FRAMES + 10):
         if zero_copy:
             frame = view.next_frame((w, h))
+            if frame is None:
+                raise RuntimeError(f"Surface benchmark: no drawable available for {w}x{h}")
             target = frame.texture
         else:
             target = tex
