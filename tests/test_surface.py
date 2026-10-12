@@ -388,6 +388,33 @@ def test_zero_copy_mixed_with_texture_present(widget, device, fill):
     widget.present(frame)
 
 
+def test_concurrent_drawable_sizes(widget, device):
+    surface = widget.surface
+    tex = device.texture(_rgba(17, 33), "rgba8Unorm")
+    barrier = threading.Barrier(3, timeout=5)
+
+    def acquire(size):
+        for _ in range(30):
+            barrier.wait()
+            frame = surface.next_frame(size)
+            assert frame is not None
+            assert (frame.width, frame.height) == size
+            del frame  # return the drawable before the next round
+
+    def present():
+        for _ in range(30):
+            barrier.wait()
+            assert surface.present(tex, wait=True)
+
+    # Compete across both acquisition paths with three different sizes.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        pending = [executor.submit(acquire, (64, 48)),
+                   executor.submit(acquire, (96, 72)),
+                   executor.submit(present)]
+        for future in pending:
+            future.result(timeout=15)
+
+
 def test_next_frame_tracks_resize(app, widget):
     for size in [(500, 300), (211, 97)]:
         widget.resize(*size)

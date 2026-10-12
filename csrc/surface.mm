@@ -173,6 +173,8 @@ CGSize view_pixel_size(NSView* view) {
 } // namespace
 
 struct Surface::Impl {
+    // Lock before mutex; close() never waits for drawable acquisition.
+    std::mutex                acquisition_mutex;
     std::mutex                mutex;
     CAMetalLayer*              layer = nil;
     // Weak: the toolkit (e.g. Qt) owns the view and may destroy it before
@@ -382,10 +384,6 @@ bool Surface::present(Texture* src, bool wait, Event* wait_event, uint64_t wait_
                 "Surface.present: integer textures can't be displayed directly -- "
                 "convert to a normalized or float format first");
 
-        CGSize size = CGSizeMake(tex.width, tex.height);
-        if (!CGSizeEqualToSize(layer.drawableSize, size))
-            layer.drawableSize = size;
-
         id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)device_->queue();
         id<MTLCommandBuffer> cmd = [queue commandBuffer];
         if (!cmd)
@@ -395,7 +393,14 @@ bool Surface::present(Texture* src, bool wait, Event* wait_event, uint64_t wait_
 
         // Acquire the drawable as late as possible -- it's a scarce resource
         // (max_drawables of them) and this can block until one frees up.
-        id<CAMetalDrawable> drawable = [layer nextDrawable];
+        id<CAMetalDrawable> drawable;
+        {
+            std::lock_guard<std::mutex> acquisition_lock(impl_->acquisition_mutex);
+            CGSize size = CGSizeMake(tex.width, tex.height);
+            if (!CGSizeEqualToSize(layer.drawableSize, size))
+                layer.drawableSize = size;
+            drawable = [layer nextDrawable];
+        }
         if (!drawable)
             return false;
 
@@ -419,6 +424,7 @@ bool Surface::present(Texture* src, bool wait, Event* wait_event, uint64_t wait_
 }
 
 Frame* Surface::next_frame(uint32_t width, uint32_t height) {
+    std::lock_guard<std::mutex> acquisition_lock(impl_->acquisition_mutex);
     std::unique_lock<std::mutex> lock(impl_->mutex);
     if (impl_->closed)
         throw std::runtime_error("Surface.next_frame: surface is closed");
