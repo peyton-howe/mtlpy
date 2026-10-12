@@ -12,6 +12,7 @@ from .heap import Heap
 from .sync import Event, Fence, Queue, SharedEvent, SharedEventHandle
 from .texture import Sampler, Texture
 from .utils import StorageMode
+from .surface import Frame, Surface
 from . import operators
 
 # Read from the installed package's own metadata (which scikit-build-core
@@ -21,5 +22,5 @@ __version__ = _version("mtlpy")
 __all__ = [
     "Device", "Buffer", "Heap", "Texture", "Sampler", "StorageMode", "operators",
     "list_devices", "Event", "SharedEvent", "SharedEventHandle", "Fence", "Queue",
-    "BinaryArchive", "Capture", "CaptureScope",
+    "BinaryArchive", "Capture", "CaptureScope", "Surface", "Frame",
 ]

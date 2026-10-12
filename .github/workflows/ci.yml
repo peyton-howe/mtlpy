@@ -29,6 +29,11 @@ jobs:
       - name: Install mtlpy (editable, with dev extras)
         run: pip install -e ".[dev]"
 
+      # Not an mtlpy dependency -- only for tests/test_surface.py, which
+      # drives Surface through examples/qt/metal_widget.py (skipped without it).
+      - name: Install PySide6 (Surface tests)
+        run: pip install PySide6
+
       - name: Run test suite
         run: pytest tests/ -v
 

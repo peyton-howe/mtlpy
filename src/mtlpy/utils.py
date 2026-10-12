@@ -93,18 +93,20 @@ def to_numpy(hint) -> np.dtype:
 # deliberately non-exhaustive set covering 8-bit and float image data
 # (Metal defines >100 pixel formats; most are for graphics, not compute).
 _PIXEL_FORMAT_TABLE = [
-    ("r8Unorm",     10,  1, np.uint8,   True,  "float"),
-    ("rgba8Unorm",  70,  4, np.uint8,   True,  "float"),
-    ("r8Uint",      13,  1, np.uint8,   False, "uint"),
-    ("rgba8Uint",   73,  4, np.uint8,   False, "uint"),
-    ("r16Uint",     23,  1, np.uint16,  False, "uint"),
-    ("rgba16Uint",  113, 4, np.uint16,  False, "uint"),
-    ("r16Float",    25,  1, np.float16, False, "half"),
-    ("rgba16Float", 115, 4, np.float16, False, "half"),
-    ("r32Float",    55,  1, np.float32, False, "float"),
-    ("rgba32Float", 125, 4, np.float32, False, "float"),
-    ("r32Uint",     53,  1, np.uint32,  False, "uint"),
-    ("rgba32Uint",  123, 4, np.uint32,  False, "uint"),
+    ("r8Unorm",         10,  1, np.uint8,   True,  "float"),
+    ("rgba8Unorm",      70,  4, np.uint8,   True,  "float"),
+    ("r8Uint",          13,  1, np.uint8,   False, "uint"),
+    ("rgba8Uint",       73,  4, np.uint8,   False, "uint"),
+    ("bgra8Unorm",      80,  4, np.uint8,   True,  "float"),
+    ("bgra8Unorm_srgb", 81,  4, np.uint8,   True,  "float"),
+    ("r16Uint",         23,  1, np.uint16,  False, "uint"),
+    ("rgba16Uint",      113, 4, np.uint16,  False, "uint"),
+    ("r16Float",        25,  1, np.float16, False, "half"),
+    ("rgba16Float",     115, 4, np.float16, False, "half"),
+    ("r32Float",        55,  1, np.float32, False, "float"),
+    ("rgba32Float",     125, 4, np.float32, False, "float"),
+    ("r32Uint",         53,  1, np.uint32,  False, "uint"),
+    ("rgba32Uint",      123, 4, np.uint32,  False, "uint"),
 ]
 class PixelFormatInfo(NamedTuple):
     mtl_value: int

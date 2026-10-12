@@ -19,6 +19,7 @@
 #include "queue.h"
 #include "sampler.h"
 #include "texture.h"
+#include "surface.h"
 
 namespace nb = nanobind;
 using namespace mtlpy;
@@ -128,7 +129,19 @@ NB_MODULE(_mtlpy, m) {
              nb::keep_alive<0, 1>())   // keep Device alive while SharedEvent is alive
         .def("create_fence", &Device::create_fence,
              nb::rv_policy::take_ownership,
-             nb::keep_alive<0, 1>());  // keep Device alive while Fence is alive
+             nb::keep_alive<0, 1>())   // keep Device alive while Fence is alive
+        .def("create_surface",
+             [](Device& d, uintptr_t view_ptr, uint32_t pixel_format, uint32_t gravity,
+                bool linear_filter, uint32_t colorspace, bool edr, bool display_sync,
+                uint32_t max_drawables) {
+                 return new Surface(&d, view_ptr, pixel_format, gravity, linear_filter,
+                                    colorspace, edr, display_sync, max_drawables);
+             },
+             nb::arg("view_ptr"), nb::arg("pixel_format"), nb::arg("gravity"),
+             nb::arg("linear_filter"), nb::arg("colorspace"), nb::arg("edr"),
+             nb::arg("display_sync"), nb::arg("max_drawables"),
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>());  // keep Device alive while Surface is alive
 
     nb::class_<Buffer>(m, "Buffer")
         .def_prop_ro("data_ptr", [](const Buffer& b) {
@@ -372,4 +385,41 @@ NB_MODULE(_mtlpy, m) {
              nb::keep_alive<1, 9>(), nb::keep_alive<1, 10>())
         .def("thread_execution_width",      &Pipeline::thread_execution_width)
         .def("max_threads_per_threadgroup", &Pipeline::max_threads_per_threadgroup);
+
+    nb::class_<Surface>(m, "Surface")
+        // present() never touches AppKit, so it can drop the GIL --
+        // nextDrawable can block for up to a frame (or 1s when occluded).
+        .def("present", &Surface::present,
+             nb::arg("src"), nb::arg("wait") = false,
+             nb::arg("wait_event").none() = nullptr, nb::arg("wait_value") = 0,
+             nb::call_guard<nb::gil_scoped_release>())
+        // Can block in nextDrawable like present(). The Frame keeps the
+        // Surface alive (it's only valid to present on its own Surface).
+        .def("next_frame", &Surface::next_frame,
+             nb::arg("width") = 0, nb::arg("height") = 0,
+             nb::rv_policy::take_ownership,
+             nb::keep_alive<0, 1>(),
+             nb::call_guard<nb::gil_scoped_release>())
+        .def("present_frame", &Surface::present_frame,
+             nb::arg("frame"), nb::arg("wait") = false,
+             nb::arg("wait_event").none() = nullptr, nb::arg("wait_value") = 0,
+             nb::call_guard<nb::gil_scoped_release>())
+        .def("update_layout", &Surface::update_layout)
+        .def("close",         &Surface::close)
+        .def_prop_ro("closed",          &Surface::closed)
+        .def_prop_ro("pixel_format",    &Surface::pixel_format)
+        .def_prop_ro("last_present_gpu_time", &Surface::last_present_gpu_time)
+        .def_prop_ro("view_width",      &Surface::view_width)
+        .def_prop_ro("view_height",     &Surface::view_height)
+        .def_prop_ro("drawable_width",  &Surface::drawable_width)
+        .def_prop_ro("drawable_height", &Surface::drawable_height);
+
+    nb::class_<Frame>(m, "Frame")
+        // No keep_alive back to the Frame: a lingering Texture wrapper must
+        // not pin the drawable (that would starve the layer's pool).
+        .def("texture", &Frame::texture, nb::rv_policy::take_ownership)
+        .def_prop_ro("width",        &Frame::width)
+        .def_prop_ro("height",       &Frame::height)
+        .def_prop_ro("pixel_format", &Frame::pixel_format)
+        .def_prop_ro("presented",    &Frame::presented);
 }

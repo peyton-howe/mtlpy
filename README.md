@@ -674,6 +674,101 @@ that aren't implied by resource usage alone. For ordering across
 *different* queues, use `Event`/`SharedEvent` instead -- `Fence`'s guarantee
 is scoped to a single queue.
 
+## Displaying textures in a window (PySide6)
+
+`mtlpy.Surface` attaches a `CAMetalLayer` to any `NSView`. Kernels can render
+**straight into the window's drawable**: no intermediate texture, no copy
+pass, and no CPU round-trip. mtlpy itself has no Qt dependency.
+[`examples/qt/metal_widget.py`](examples/qt/metal_widget.py) is a small PySide6
+`QWidget` around `Surface`; copy it into your project and adapt it as needed:
+
+```python
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+import mtlpy
+from metal_widget import MetalWidget   # examples/qt/metal_widget.py
+
+app = QApplication([])
+device = mtlpy.Device()
+kernel = device.compile(source, "render")   # writes texture2d<float, access::write>
+
+view = MetalWidget(device)
+view.show()
+
+def tick():
+    frame = view.next_frame()         # the next drawable, sized to the widget in pixels
+    if frame is None:                 # hidden/minimized: skip this frame
+        return
+    with frame:                       # presents at the end of the block
+        kernel.run([], grid=(frame.width, frame.height, 1),
+                   textures=[frame.texture], wait=False)
+
+timer = QTimer(); timer.timeout.connect(tick); timer.start(0)
+app.exec()
+```
+
+### Zero-copy: `next_frame()` + `present(frame)`
+
+- `frame.texture` *is* the drawable that gets composited. It's `bgra8Unorm`
+  by default; kernels still write `float4` RGBA, and Metal swizzles to BGRA
+  on store. It's GPU-private and its initial contents are undefined, so write
+  every pixel.
+- **Valid only until presented.** After that, Core Animation recycles it
+  for a later frame. If you need an image that persists across frames, render
+  into your own `Texture` and use `present(texture)`.
+- A `Frame` holds one of the layer's `max_drawables` (default 3) drawables
+  until it's presented or garbage collected, so don't keep frames around.
+  With vsync on, `next_frame()` blocks until a drawable frees up, which paces
+  the loop to the display.
+- `next_frame((w, h))` picks a different resolution, which Core Animation
+  scales to the widget.
+- Zero-copy needs a drawable format mtlpy can wrap as a `Texture`:
+  `bgra8Unorm`, `bgra8Unorm_srgb` or `rgba16Float`.
+
+### Copy: `present(texture)`
+
+Draws an existing `Texture` into the next drawable with one GPU pass. Use it
+when the image must persist across frames, has its own size, or is in a
+format a drawable can't be (`rgba8Unorm`, `r32Float` shown as grayscale,
+private storage, ...). The drawable takes the texture's size and is scaled to
+the widget: `scaling="aspect"` (letterboxed, default), `"fill"`, `"stretch"`
+or `"center"`, with `filter="linear"` or `"nearest"`. Integer formats have to
+be converted first.
+
+What the copy costs, in GPU time (`benchmarks/surface_bench.py`, Apple M4
+Pro). A trivial fill kernel stands in for your work:
+
+| Resolution | Fill kernel | `present(texture)` pass | `present(frame)` |
+|---|---|---|---|
+| 1280×720  | 0.05 ms | 0.07 ms | ~0 |
+| 1920×1080 | 0.11 ms | 0.23 ms | ~0 |
+| 3840×2160 | 0.44 ms | 0.92 ms | ~0 |
+
+`Surface.last_present_gpu_time` reports this per present for your own workload.
+
+### Both modes
+
+- **Ordering.** Presenting goes on the Device's default queue, so it's
+  ordered after any `Pipeline.run(...)` already committed, `wait=False` or
+  not. For work on a secondary `Queue`, use `present(..., wait_for=(event, value))`.
+- **Threading.** Create the widget on the GUI thread. `next_frame()` and
+  `present()` release the GIL and can be called from a render thread. While
+  the widget is hidden, `next_frame()` returns `None` and `present(texture)`
+  returns `False`, so neither stalls waiting for a drawable.
+- **Options** (keyword arguments to `MetalWidget`/`Surface`): `pixel_format`
+  (`bgra8Unorm`, `bgra8Unorm_srgb`, `rgba16Float`, `rgb10a2Unorm`,
+  `bgr10a2Unorm`), `colorspace` (`"srgb"`, `"display_p3"`, `"linear_srgb"`,
+  `"extended_linear_srgb"`, `None`), `edr`, `display_sync` (vsync),
+  `max_drawables` (2 or 3).
+
+Without the example widget: `device.surface(int(widget.winId()))` takes any
+`NSView*`, so other toolkits work the same way. Examples:
+
+- `examples/qt/render_loop.py`: an animated zero-copy render loop.
+- `examples/qt/orientation.py`: a test card (text, an arrow, a color per
+  corner) shown through both paths, for checking orientation and channel
+  order by eye.
+
 ## Binary archives
 
 Every `Device` already compiles-once-and-reuses identical (source, function
@@ -792,6 +887,10 @@ pytest tests/
   (regression coverage for the Metal object-ownership rules in `csrc/`),
   plus multi-threaded dispatch/compilation tests (`Pipeline.run` releases
   the GIL, so this exercises genuinely concurrent Metal calls).
+- `test_surface.py` — `Surface` zero-copy (`next_frame`) and
+  copy (`present(texture)`) presentation across texture and drawable formats,
+  resize, queue/event ordering, drawable-pool recycling, and lifetime
+  through `examples/qt/metal_widget.py` (skipped without PySide6).
 - `test_pipeline_persistence.py` — spawns separate processes to verify the
   on-disk pipeline binary archive is actually written and read back, and
   that `Device.flush_cache()` writes it on demand.

@@ -182,6 +182,12 @@ public:
     // optimization.
     MTL::Device* mtl() const { return device_; }
 
+    // This Device's own default queue -- the one Pipeline::run()'s
+    // self-contained dispatch commits to. Surface::present() encodes on it
+    // too, so a present is ordered after every dispatch already committed
+    // here (same-queue commit order) without any explicit synchronization.
+    MTL::CommandQueue* queue() const { return queue_; }
+
 private:
     MTL::Device*       device_;
     MTL::CommandQueue* queue_;
